@@ -9,6 +9,10 @@ This document describes the current REST API implemented in this backend.
 - API prefix: `/api/v1`
 - Default local base URL: `http://localhost:3000/api/v1`
 
+Environment variables required for auth:
+
+- `FIREBASE_WEB_API_KEY`: Firebase Web API key used by backend to verify email/password login
+
 Health endpoint:
 
 - `GET /` -> `Hello world`
@@ -197,6 +201,87 @@ Entity-specific 404 examples:
 ```
 
 ## Endpoints
+
+## Authentication
+
+### Register Flow (Android -> Node.js -> Firebase Auth)
+
+### POST `/auth/register`
+
+Create a Firebase Auth user and initialize profile data in Firestore.
+
+Request body:
+
+```json
+{
+  "email": "john@example.com",
+  "password": "secret123",
+  "displayName": "John Doe",
+  "username": "john_doe",
+  "nickname": "John",
+  "avatarUrl": "https://example.com/avatar.jpg",
+  "status": "active"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "email": "john@example.com"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "email and password are required"
+}
+```
+
+Response `409`:
+
+```json
+{
+  "message": "email already exists"
+}
+```
+
+### Login Flow (Android -> Node.js -> Firebase Auth verify -> custom token -> Android)
+
+### POST `/auth/login`
+
+Verify email/password against Firebase Auth using Identity Toolkit API, then return Firebase custom token.
+
+Request body:
+
+```json
+{
+  "email": "john@example.com",
+  "password": "secret123"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "customToken": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+Response `401`:
+
+```json
+{
+  "message": "invalid email or password"
+}
+```
+
+Android should then call Firebase Auth `signInWithCustomToken(customToken)`.
 
 ## Users
 
@@ -534,6 +619,6 @@ curl "http://localhost:3000/api/v1/groups"
 
 ## Notes
 
-- There is currently no authentication/authorization middleware enabled.
+- Authentication endpoints are available under `/auth` for register/login.
 - Input validation is minimal; malformed payloads may still be accepted.
 - Timestamp fields are represented as `date | null` in API responses.
