@@ -1,0 +1,151 @@
+Firestore Database Schema for Scrapbook Widget App
+
+1. Users Collection
+   Path: users/{userId}
+
+Fields:
+
+- username (string): unique username
+- nickname (string): display name
+- email (string): user email
+- avatarUrl (string): profile image URL
+- createdAt (timestamp): account creation time
+- status (string): active / inactive
+
+Subcollection:
+widgets/{friendId}
+
+- latestPhotoUrl (string)
+- senderAvatar (string)
+- status (string)
+- updatedAt (timestamp)
+
+2. Groups Collection
+   Path: groups/{groupId}
+
+Fields:
+
+- groupName (string)
+- avatarUrl (string)
+- createdBy (string)
+- createdAt (timestamp)
+
+Subcollection:
+members/{userId}
+
+- role (string): admin / member
+- joinedAt (timestamp)
+
+3. Scrapbook Pages
+   Path: groups/{groupId}/scrapbookPages/{pageId}
+
+Fields:
+
+- title (string)
+- createdBy (string)
+- createdAt (timestamp)
+- templateId (string, optional)
+- backgroundColor (string)
+- backgroundImage (string)
+
+Subcollection:
+items/{itemId}
+
+- type (string): photo / sticker / text
+- createdBy (string)
+- createdAt (timestamp)
+- content (map)
+- layout (map)
+
+4. Layout Object
+   Map structure for item placement on canvas:
+
+- x (number): horizontal position
+- y (number): vertical position
+- width (number)
+- height (number)
+- rotation (number)
+- scale (number)
+- zIndex (number)
+
+5. Content Object Examples
+   Photo item:
+
+- photoUrl (string)
+- caption (string)
+
+Sticker item:
+
+- stickerUrl (string)
+
+Text item:
+
+- text (string)
+- fontSize (number)
+- color (string)
+
+6. Templates Collection
+   Path: templates/{templateId}
+
+Fields:
+
+- name (string)
+- previewImage (string)
+- category (string)
+- createdAt (timestamp)
+
+Subcollection:
+items/{itemId}
+
+- type (string)
+- layout (map)
+- placeholder (boolean)
+
+7. Messages (Group Chat)
+   Path: groups/{groupId}/messages/{messageId}
+
+Fields:
+
+- content (string)
+- createdBy (string)
+- createdAt (timestamp)
+- type (string): text / image
+
+Subcollection:
+seenBy/{userId}
+
+- seenAt (timestamp)
+
+8. Full Collection Hierarchy
+   users
+   └── userId
+   ├── username
+   ├── nickname
+   ├── email
+   ├── avatarUrl
+   ├── createdAt
+   ├── status
+   └── widgets
+   └── friendId
+
+groups
+└── groupId
+├── groupName
+├── avatarUrl
+├── createdBy
+├── createdAt
+├── members
+│ └── userId
+├── scrapbookPages
+│ └── pageId
+│ └── items
+│ └── itemId
+└── messages
+└── messageId
+└── seenBy
+└── userId
+
+templates
+└── templateId
+└── items
+└── itemId

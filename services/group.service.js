@@ -1,0 +1,133 @@
+import { FieldValue } from "firebase-admin/firestore";
+
+import { db } from "../firebaseConfig.js";
+import {
+    GroupModel,
+    MemberModel,
+    MessageModel,
+    ScrapbookItemModel,
+    ScrapbookPageModel,
+    SeenByModel,
+} from "../models/index.js";
+
+const groupsCollection = db.collection("groups");
+
+export async function listGroups() {
+    const snapshot = await groupsCollection.get();
+    return snapshot.docs.map(GroupModel.fromSnapshot);
+}
+
+export async function getGroupById(groupId) {
+    const doc = await groupsCollection.doc(groupId).get();
+    if (!doc.exists) {
+        return null;
+    }
+    return GroupModel.fromSnapshot(doc);
+}
+
+export async function createGroup(payload) {
+    const docRef = groupsCollection.doc();
+    const group = new GroupModel({ ...payload, createdAt: FieldValue.serverTimestamp() });
+    await docRef.set(group.toFirestore());
+    const created = await docRef.get();
+    return GroupModel.fromSnapshot(created);
+}
+
+export async function listMembers(groupId) {
+    const snapshot = await groupsCollection.doc(groupId).collection("members").get();
+    return snapshot.docs.map(MemberModel.fromSnapshot);
+}
+
+export async function addOrUpdateMember(groupId, userId, payload) {
+    const docRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+    const member = new MemberModel({
+        id: userId,
+        ...payload,
+        joinedAt: payload.joinedAt ?? FieldValue.serverTimestamp(),
+    });
+    await docRef.set(member.toFirestore(), { merge: true });
+    const updated = await docRef.get();
+    return MemberModel.fromSnapshot(updated);
+}
+
+export async function listScrapbookPages(groupId) {
+    const snapshot = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .get();
+    return snapshot.docs.map(ScrapbookPageModel.fromSnapshot);
+}
+
+export async function createScrapbookPage(groupId, payload) {
+    const docRef = groupsCollection.doc(groupId).collection("scrapbookPages").doc();
+    const page = new ScrapbookPageModel({
+        ...payload,
+        createdAt: FieldValue.serverTimestamp(),
+    });
+    await docRef.set(page.toFirestore());
+    const created = await docRef.get();
+    return ScrapbookPageModel.fromSnapshot(created);
+}
+
+export async function listScrapbookItems(groupId, pageId) {
+    const snapshot = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .get();
+    return snapshot.docs.map(ScrapbookItemModel.fromSnapshot);
+}
+
+export async function createScrapbookItem(groupId, pageId, payload) {
+    const docRef = groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .doc();
+
+    const item = new ScrapbookItemModel({
+        ...payload,
+        createdAt: FieldValue.serverTimestamp(),
+    });
+
+    await docRef.set(item.toFirestore());
+    const created = await docRef.get();
+    return ScrapbookItemModel.fromSnapshot(created);
+}
+
+export async function listMessages(groupId) {
+    const snapshot = await groupsCollection.doc(groupId).collection("messages").get();
+    return snapshot.docs.map(MessageModel.fromSnapshot);
+}
+
+export async function createMessage(groupId, payload) {
+    const docRef = groupsCollection.doc(groupId).collection("messages").doc();
+    const message = new MessageModel({
+        ...payload,
+        createdAt: FieldValue.serverTimestamp(),
+    });
+    await docRef.set(message.toFirestore());
+    const created = await docRef.get();
+    return MessageModel.fromSnapshot(created);
+}
+
+export async function markMessageSeen(groupId, messageId, userId, payload = {}) {
+    const docRef = groupsCollection
+        .doc(groupId)
+        .collection("messages")
+        .doc(messageId)
+        .collection("seenBy")
+        .doc(userId);
+
+    const seenBy = new SeenByModel({
+        id: userId,
+        ...payload,
+        seenAt: payload.seenAt ?? FieldValue.serverTimestamp(),
+    });
+
+    await docRef.set(seenBy.toFirestore(), { merge: true });
+    const updated = await docRef.get();
+    return SeenByModel.fromSnapshot(updated);
+}

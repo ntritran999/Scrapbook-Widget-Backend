@@ -1,0 +1,36 @@
+import { Router } from "express";
+
+import {
+    getGroup,
+    getGroupMembers,
+    getGroupMessages,
+    getGroups,
+    getPageItems,
+    getPages,
+    postGroup,
+    postGroupMessage,
+    postPage,
+    postPageItem,
+    putGroupMember,
+    putSeenBy,
+} from "../controllers/group.controller.js";
+
+const router = Router();
+
+router.get("/", getGroups);
+router.get("/:groupId", getGroup);
+router.post("/", postGroup);
+
+router.get("/:groupId/members", getGroupMembers);
+router.put("/:groupId/members/:userId", putGroupMember);
+
+router.get("/:groupId/scrapbook-pages", getPages);
+router.post("/:groupId/scrapbook-pages", postPage);
+router.get("/:groupId/scrapbook-pages/:pageId/items", getPageItems);
+router.post("/:groupId/scrapbook-pages/:pageId/items", postPageItem);
+
+router.get("/:groupId/messages", getGroupMessages);
+router.post("/:groupId/messages", postGroupMessage);
+router.put("/:groupId/messages/:messageId/seen-by/:userId", putSeenBy);
+
+export default router;

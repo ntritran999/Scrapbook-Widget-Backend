@@ -1,0 +1,65 @@
+import { normalizeTimestamp } from "./modelUtils.js";
+
+export class WidgetModel {
+    constructor({
+        id = null,
+        latestPhotoUrl = "",
+        senderAvatar = "",
+        status = "",
+        updatedAt = null,
+    } = {}) {
+        this.id = id;
+        this.latestPhotoUrl = latestPhotoUrl;
+        this.senderAvatar = senderAvatar;
+        this.status = status;
+        this.updatedAt = normalizeTimestamp(updatedAt);
+    }
+
+    static fromSnapshot(snapshot) {
+        return new WidgetModel({ id: snapshot.id, ...snapshot.data() });
+    }
+
+    toFirestore() {
+        return {
+            latestPhotoUrl: this.latestPhotoUrl,
+            senderAvatar: this.senderAvatar,
+            status: this.status,
+            updatedAt: this.updatedAt,
+        };
+    }
+}
+
+export class UserModel {
+    constructor({
+        id = null,
+        username = "",
+        nickname = "",
+        email = "",
+        avatarUrl = "",
+        createdAt = null,
+        status = "active",
+    } = {}) {
+        this.id = id;
+        this.username = username;
+        this.nickname = nickname;
+        this.email = email;
+        this.avatarUrl = avatarUrl;
+        this.createdAt = normalizeTimestamp(createdAt);
+        this.status = status;
+    }
+
+    static fromSnapshot(snapshot) {
+        return new UserModel({ id: snapshot.id, ...snapshot.data() });
+    }
+
+    toFirestore() {
+        return {
+            username: this.username,
+            nickname: this.nickname,
+            email: this.email,
+            avatarUrl: this.avatarUrl,
+            createdAt: this.createdAt,
+            status: this.status,
+        };
+    }
+}
