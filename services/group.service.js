@@ -79,6 +79,20 @@ export async function listScrapbookItems(groupId, pageId) {
     return snapshot.docs.map(ScrapbookItemModel.fromSnapshot);
 }
 
+export async function getItemById(groupId, pageId, itemId) {
+    const doc = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .doc(itemId)
+        .get();
+    if (!doc.exists) {
+        return null;
+    } 
+    return ScrapbookItemModel.fromSnapshot(doc)
+}
+
 export async function createScrapbookItem(groupId, pageId, payload) {
     const docRef = groupsCollection
         .doc(groupId)

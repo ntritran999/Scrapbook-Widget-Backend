@@ -7,6 +7,7 @@ import {
     getGroups,
     getPageItems,
     getPages,
+    getItem,
     postGroup,
     postGroupMessage,
     postPage,
@@ -28,6 +29,7 @@ router.get("/:groupId/scrapbook-pages", getPages);
 router.post("/:groupId/scrapbook-pages", postPage);
 router.get("/:groupId/scrapbook-pages/:pageId/items", getPageItems);
 router.post("/:groupId/scrapbook-pages/:pageId/items", postPageItem);
+router.get("/:groupId/scrapbook-pages/:pageId/:itemId", getItem);
 
 router.get("/:groupId/messages", getGroupMessages);
 router.post("/:groupId/messages", postGroupMessage);
