@@ -5,6 +5,7 @@ import {
     createScrapbookItem,
     createScrapbookPage,
     getGroupById,
+    getItemById,
     listGroups,
     listMembers,
     listMessages,
@@ -89,6 +90,18 @@ export async function getPageItems(req, res, next) {
         res.json(items);
     } catch (error) {
         next(error);
+    }
+}
+
+export async function getItem(req, res, next) {
+    try {
+        const item = await getItemById(req.params.groupId, req.params.pageId, req.params.itemId);
+        if (!item) {
+            return res.status(404).json({ message: "Item not found" });
+        }
+        return res.json(item);
+    } catch (error) {
+        next(error)
     }
 }
 
