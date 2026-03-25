@@ -19,6 +19,8 @@ widgets/{friendId}
 - senderAvatar (string)
 - status (string)
 - updatedAt (timestamp)
+- groupId (string)
+- pageId (string)
 
 2. Groups Collection
    Path: groups/{groupId}
