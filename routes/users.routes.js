@@ -3,6 +3,7 @@ import { Router } from "express";
 import {
     getUser,
     getUsers,
+    getUserGroups,
     getWidgets,
     patchUser,
     postUser,
@@ -13,6 +14,7 @@ const router = Router();
 
 router.get("/", getUsers);
 router.get("/:userId", getUser);
+router.get("/:userId/groups", getUserGroups);
 router.post("/", postUser);
 router.patch("/:userId", patchUser);
 

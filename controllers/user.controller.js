@@ -1,6 +1,7 @@
 import {
     createUser,
     getUserById,
+    getGroupsByUserId,
     listUsers,
     listUserWidgets,
     updateUser,
@@ -23,6 +24,18 @@ export async function getUser(req, res, next) {
             return res.status(404).json({ message: "User not found" });
         }
         return res.json(user);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function getUserGroups(req, res, next) {
+    try {
+        const groups = await getGroupsByUserId(req.params.userId);
+        if (!groups) {
+            return res.status(404).json({ message: "Groups not found" });
+        }
+        return res.json(groups);
     } catch (error) {
         return next(error);
     }

@@ -87,7 +87,9 @@ Entity-specific 404 examples:
   "latestPhotoUrl": "string",
   "senderAvatar": "string",
   "status": "string",
-  "updatedAt": "date | null"
+  "updatedAt": "date | null",
+  "groupId": "string",
+  "pageId": "string",
 }
 ```
 
