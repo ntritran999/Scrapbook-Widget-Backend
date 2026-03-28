@@ -11,7 +11,8 @@ This document describes the current REST API implemented in this backend.
 
 Environment variables required for auth:
 
-- `FIREBASE_WEB_API_KEY`: Firebase Web API key used by backend to verify email/password login
+- Firebase Admin service account key file at `config/firebaseServiceAccountKey.json`
+- `FIREBASE_WEB_API_KEY` for `POST /auth/login` (Firebase Identity Toolkit sign-in)
 
 Environment variables required for media storage:
 
@@ -41,6 +42,7 @@ node index.js
 
 - `200 OK`: Successful read/update
 - `201 Created`: Resource created
+- `401 Unauthorized`: Missing/invalid/expired Firebase ID token
 - `404 Not Found`: Route or entity not found
 - `500 Internal Server Error`: Unexpected server error
 
@@ -276,11 +278,17 @@ Response `409`:
 }
 ```
 
-### Login Flow (Android -> Node.js -> Firebase Auth verify -> custom token -> Android)
+### Login Flow (Android -> Firebase Auth -> ID Token -> Node.js)
+
+Android should sign in directly with Firebase Auth `signInWithEmailAndPassword(email, password)`, then send Firebase ID token to backend.
+
+### Login Flow (Android -> Node.js -> Firebase Auth)
+
+If mobile app does not sign in with Firebase SDK directly, it can call backend login endpoint below using email/password.
 
 ### POST `/auth/login`
 
-Verify email/password against Firebase Auth using Identity Toolkit API, then return Firebase custom token.
+Sign in with Firebase email/password via Identity Toolkit and return tokens.
 
 Request body:
 
@@ -296,7 +304,18 @@ Response `200`:
 ```json
 {
   "uid": "firebaseUid",
-  "customToken": "eyJhbGciOiJSUzI1NiIs..."
+  "email": "john@example.com",
+  "idToken": "eyJhbGciOiJSUzI1NiIs...",
+  "refreshToken": "AE0u...",
+  "expiresIn": 3600
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "email and password are required"
 }
 ```
 
@@ -308,7 +327,157 @@ Response `401`:
 }
 ```
 
-Android should then call Firebase Auth `signInWithCustomToken(customToken)`.
+Response `403`:
+
+```json
+{
+  "message": "account is inactive or deleted"
+}
+```
+
+### POST `/auth/session`
+
+Verify Firebase ID token and return authenticated session info.
+
+Request body:
+
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "email": "john@example.com",
+  "name": "John Doe",
+  "picture": "https://example.com/avatar.jpg",
+  "session": {
+    "valid": true,
+    "authTime": 1711475082,
+    "issuedAt": 1711475090,
+    "expiresAt": 1711478690
+  }
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "idToken is required"
+}
+```
+
+Response `401`:
+
+```json
+{
+  "message": "invalid or expired idToken"
+}
+```
+
+### POST `/auth/signout`
+
+Revoke refresh tokens for the current user. Requires Authorization header.
+
+Header:
+
+```http
+Authorization: Bearer <firebase_id_token>
+```
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "signedOut": true,
+  "tokensValidAfterTime": "2026-03-28T10:20:30.000Z"
+}
+```
+
+Response `401`:
+
+```json
+{
+  "message": "Missing or invalid Authorization header"
+}
+```
+
+### DELETE `/auth/account`
+
+Delete account with soft-delete first, then hard-delete Firebase Auth user.
+
+Behavior:
+
+- Soft delete profile in `users/{uid}`: set `status = inactive`, mark `isDeleted = true`, and apply default avatar/text placeholders.
+- Transfer ownership for groups created by this user to an active member if possible.
+- Remove this user from all group memberships and `seenBy` records.
+- Anonymize author references in messages/scrapbook pages/scrapbook items with fallback text/image placeholders.
+- Anonymize widgets pointing to this user to avoid broken UI context.
+- Hard delete Firebase Auth account after cleanup.
+
+Requires Authorization header.
+
+Header:
+
+```http
+Authorization: Bearer <firebase_id_token>
+```
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "softDeleted": true,
+  "hardDeletedAuth": true,
+  "placeholders": {
+    "userAvatarUrl": "https://placehold.co/128x128?text=Deleted",
+    "contentImageUrl": "https://placehold.co/600x400?text=Deleted+Content",
+    "text": "[Content from deleted account]"
+  },
+  "cleanup": {
+    "groupsOwnershipTransferred": 2,
+    "membershipsRemoved": 4,
+    "messagesAnonymized": 6,
+    "messageSeenByRemoved": 7,
+    "scrapbookPagesAnonymized": 3,
+    "scrapbookItemsAnonymized": 10,
+    "widgetsAnonymized": 5,
+    "ownWidgetsRemoved": 2,
+    "batchCommits": 1
+  }
+}
+```
+
+Response `401`:
+
+```json
+{
+  "message": "Missing or invalid Authorization header"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "account not found"
+}
+```
+
+## Authorization
+
+All `/users`, `/groups`, `/templates`, `/auth/signout`, and `/auth/account` endpoints require Firebase ID token in Authorization header:
+
+```http
+Authorization: Bearer <firebase_id_token>
+```
 
 ## Users
 

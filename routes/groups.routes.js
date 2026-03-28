@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import { requireAuth } from "../middlewares/auth.middleware.js";
 import {
     getGroup,
     getGroupMembers,
@@ -18,6 +19,8 @@ import {
 import { uploadImage, handleUploadError } from "../middleware/upload.js";
 
 const router = Router();
+
+router.use(requireAuth);
 
 router.get("/", getGroups);
 router.get("/:groupId", getGroup);
