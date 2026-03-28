@@ -107,10 +107,23 @@ export async function getItem(req, res, next) {
 
 export async function postPageItem(req, res, next) {
     try {
+        // Prepare payload with file data if file is uploaded
+        const payload = { ...req.body };
+
+        if (req.file) {
+            // File was uploaded via multer, add it to content
+            payload.content = {
+                ...(payload.content || {}),
+                file: req.file.buffer, // File buffer from multer
+                originalName: req.file.originalname,
+                mimetype: req.file.mimetype,
+            };
+        }
+
         const item = await createScrapbookItem(
             req.params.groupId,
             req.params.pageId,
-            req.body
+            payload
         );
         res.status(201).json(item);
     } catch (error) {
