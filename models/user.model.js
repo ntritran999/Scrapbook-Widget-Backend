@@ -7,12 +7,16 @@ export class WidgetModel {
         senderAvatar = "",
         status = "",
         updatedAt = null,
+        groupId = "",
+        pageId = "",
     } = {}) {
         this.id = id;
         this.latestPhotoUrl = latestPhotoUrl;
         this.senderAvatar = senderAvatar;
         this.status = status;
         this.updatedAt = normalizeTimestamp(updatedAt);
+        this.groupId = groupId;
+        this.pageId = pageId;
     }
 
     static fromSnapshot(snapshot) {

@@ -4,6 +4,7 @@ import { requireAuth } from "../middlewares/auth.middleware.js";
 import {
     getUser,
     getUsers,
+    getUserGroups,
     getWidgets,
     patchUser,
     postUser,
@@ -16,6 +17,7 @@ router.use(requireAuth);
 
 router.get("/", getUsers);
 router.get("/:userId", getUser);
+router.get("/:userId/groups", getUserGroups);
 router.post("/", postUser);
 router.patch("/:userId", patchUser);
 

@@ -3,6 +3,8 @@ import { FieldValue } from "firebase-admin/firestore";
 import { db } from "../firebaseConfig.js";
 import { UserModel, WidgetModel } from "../models/index.js";
 
+import { listGroups, listMembers } from "./group.service.js";
+
 const usersCollection = db.collection("users");
 
 export async function listUsers() {
@@ -16,6 +18,22 @@ export async function getUserById(userId) {
         return null;
     }
     return UserModel.fromSnapshot(doc);
+}
+
+export async function getGroupsByUserId(userId) {
+    const groups = []
+    const all_groups = await listGroups();
+    for (let i = 0; i < all_groups.length; i++) {
+        const group = all_groups[i];
+        const members = await listMembers(group.id);
+        for (let j = 0; j < members.length; j++) {
+            if (members[j].id == userId) {
+                groups.push(group);
+                break;
+            }
+        }
+    }
+    return groups;
 }
 
 export async function createUser(payload) {
