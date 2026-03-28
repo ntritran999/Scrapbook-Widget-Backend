@@ -13,6 +13,11 @@ Environment variables required for auth:
 
 - `FIREBASE_WEB_API_KEY`: Firebase Web API key used by backend to verify email/password login
 
+Environment variables required for media storage:
+
+- `CLOUDINARY_CLOUD_NAME`: Cloudinary cloud name
+- `CLOUDINARY_API_KEY`: Cloudinary API key
+
 Health endpoint:
 
 - `GET /` -> `Hello world`
@@ -38,6 +43,26 @@ node index.js
 - `201 Created`: Resource created
 - `404 Not Found`: Route or entity not found
 - `500 Internal Server Error`: Unexpected server error
+
+## Media Storage & Cloudinary Integration
+
+All scrapbook items with file content (photos, images, etc.) are automatically uploaded to **Cloudinary** before being stored in the Firestore database. This ensures persistent and scalable media storage.
+
+**File Upload Format**: Use `multipart/form-data` to upload image files. The Cloudinary integration automatically handles the upload and stores the URL in Firestore.
+
+**Features**:
+- Automatic file type detection and validation
+- Quality optimization for images
+- Organized folder structure in Cloudinary: `scrapbooks/{groupId}/{userId}/{itemType}`
+- Public ID tracking for file identification and potential deletion
+- Memory-efficient file handling using multer
+
+**Supported Image Formats**: JPEG, JPG, PNG, GIF, WebP  
+**Max File Size**: 50 MB
+
+**Requirements**:
+- `CLOUDINARY_CLOUD_NAME` environment variable must be set
+- `CLOUDINARY_API_KEY` environment variable must be set
 
 ## Error Response Format
 
@@ -490,7 +515,11 @@ List items in a scrapbook page.
 
 Create item in page.
 
-Request body (text item):
+**Important**: Items are automatically uploaded to Cloudinary for persistent storage. When uploading with images/photos, use `multipart/form-data` with the image file. The file is automatically uploaded to Cloudinary and the URL is stored in the Firestore database.
+
+**For Text Items** (JSON request):
+
+Request body:
 
 ```json
 {
@@ -513,7 +542,86 @@ Request body (text item):
 }
 ```
 
-Response `201`: scrapbook item object.
+**For Photo/Image Items** (multipart/form-data):
+
+Use form-data with the following fields:
+
+- `type`: "photo" (or "sticker")
+- `createdBy`: userId (string)
+- `image`: Image file (binary file - JPEG, PNG, GIF, WebP)
+- `layout`: JSON object with positioning
+- `content` (optional): Additional JSON properties for the content object
+
+Example using curl:
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/groups/groupId/scrapbook-pages/pageId/items" \
+  -F "type=photo" \
+  -F "createdBy=userId" \
+  -F "image=@/path/to/image.jpg" \
+  -F 'layout={"x":5,"y":10,"width":200,"height":150,"rotation":0,"scale":1,"zIndex":1}'
+```
+
+**Response `201`**: The `content.url` field contains the Cloudinary URL of the uploaded item.
+
+Response example:
+
+```json
+{
+  "id": "itemId",
+  "type": "photo",
+  "createdBy": "userId",
+  "createdAt": "2024-01-15T10:30:00Z",
+  "content": {
+    "url": "https://res.cloudinary.com/your-cloud-name/image/upload/...",
+    "cloudinaryPublicId": "scrapbooks/groupId/userId/photo/1705316400000"
+  },
+  "layout": {
+    "x": 5,
+    "y": 10,
+    "width": 200,
+    "height": 150,
+    "rotation": 0,
+    "scale": 1,
+    "zIndex": 1
+  }
+}
+```
+
+**Supported Formats**: JPEG, JPG, PNG, GIF, WebP  
+**Max File Size**: 50 MB
+
+**Error Response `400`** (invalid file type):
+
+```json
+{
+  "message": "Only image files are allowed. Received: application/pdf"
+}
+```
+
+**Error Response `400`** (file too large):
+
+```json
+{
+  "message": "File is too large (max 50MB)"
+}
+```
+
+**Error Response `500`** (if Cloudinary is not configured):
+
+```json
+{
+  "message": "Cloudinary environment variables are not configured"
+}
+```
+
+**Error Response `500`** (if upload fails):
+
+```json
+{
+  "message": "Failed to upload content to Cloudinary: [error details]"
+}
+```
 
 ### GET `/groups/:groupId/messages`
 

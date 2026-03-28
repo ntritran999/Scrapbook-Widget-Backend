@@ -9,6 +9,7 @@ import {
     ScrapbookPageModel,
     SeenByModel,
 } from "../models/index.js";
+import { uploadToCloudinary } from "./cloudinary.service.js";
 
 const groupsCollection = db.collection("groups");
 
@@ -94,21 +95,60 @@ export async function getItemById(groupId, pageId, itemId) {
 }
 
 export async function createScrapbookItem(groupId, pageId, payload) {
-    const docRef = groupsCollection
-        .doc(groupId)
-        .collection("scrapbookPages")
-        .doc(pageId)
-        .collection("items")
-        .doc();
+    try {
+        // Upload content to Cloudinary first if file exists
+        let parsedData = {};
+        
+        if (payload.payload && typeof payload.payload === 'string') {
+            parsedData = JSON.parse(payload.payload); 
+        } else {
+            parsedData = payload; 
+        }
 
-    const item = new ScrapbookItemModel({
-        ...payload,
-        createdAt: FieldValue.serverTimestamp(),
-    });
+        let processedPayload = {
+            ...parsedData, 
+            content: {
+                ...parsedData.content, 
+                ...(payload.content || {}) 
+            }
+        };
 
-    await docRef.set(item.toFirestore());
-    const created = await docRef.get();
-    return ScrapbookItemModel.fromSnapshot(created);
+        if (processedPayload.content && processedPayload.content.file) {
+            const cloudinaryResult = await uploadToCloudinary(
+                processedPayload.content.file,
+                processedPayload.type || "photo",
+                processedPayload.createdBy,
+                groupId
+            );
+
+            const { file, originalName, mimetype, ...contentWithoutFile } =
+                processedPayload.content;
+            processedPayload.content = {
+                ...contentWithoutFile,
+                photoUrl: cloudinaryResult.secure_url,
+                cloudinaryPublicId: cloudinaryResult.public_id,
+            };
+        }
+
+        const docRef = groupsCollection
+            .doc(groupId)
+            .collection("scrapbookPages")
+            .doc(pageId)
+            .collection("items")
+            .doc();
+
+        const item = new ScrapbookItemModel({
+            ...processedPayload,
+            createdAt: FieldValue.serverTimestamp(),
+        });
+
+        await docRef.set(item.toFirestore());
+        const created = await docRef.get();
+        return ScrapbookItemModel.fromSnapshot(created);
+    } catch (error) {
+        console.error("Error creating scrapbook item:", error);
+        throw error;
+    }
 }
 
 export async function listMessages(groupId) {
