@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import { requireAuth } from "../middlewares/auth.middleware.js";
 import {
     getGroup,
     getGroupMembers,
@@ -17,6 +18,8 @@ import {
 } from "../controllers/group.controller.js";
 
 const router = Router();
+
+router.use(requireAuth);
 
 router.get("/", getGroups);
 router.get("/:groupId", getGroup);
