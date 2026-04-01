@@ -199,6 +199,15 @@ Entity-specific 404 examples:
 }
 ```
 
+### Item Reactions (`groups/{groupId}/scrapbookPages/{pageId}/items/{itemId}/reactions`)
+
+```json
+{
+  "id": "string",
+  "type": "string",
+}
+```
+
 ### Message (`groups/{groupId}/messages/{messageId}`)
 
 ```json

@@ -19,6 +19,9 @@ import {
     respondToGroupInvitation,
     uploadAvatarForGroup,
     updateGroup,
+    listItemReactions,
+    removeReaction,
+    addReaction
 } from "../services/group.service.js";
 import {
     sendSseEvent,
@@ -473,6 +476,32 @@ export async function putSeenBy(req, res, next) {
             req.body
         );
         res.json(seenBy);
+    } catch (error) {
+        next(error);
+    }
+}
+
+export async function getReactions(req, res, next) {
+    try {
+        const reactions = await listItemReactions(req.params.groupId, req.params.pageId, req.params.itemId);
+        res.json(reactions);
+    } catch (error) {
+        next(error);
+    }
+}
+
+export async function postReaction(req, res, next) {
+    try {
+        const payload = {... req.body};
+        const result = await addReaction(req.params.groupId, req.params.pageId, req.params.itemId, payload);
+    } catch (error) {
+        next(error);
+    }
+}
+
+export async function deleteReaction(req, res, next) {
+    try {
+        const result = await removeReaction(req.params.groupId, req.params.pageId, req.params.itemId, req.params.userId);
     } catch (error) {
         next(error);
     }

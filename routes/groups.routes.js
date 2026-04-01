@@ -11,6 +11,9 @@ import {
     getPageItems,
     getPages,
     getItem,
+    getReactions,
+    postReaction,
+    deleteReaction,
     leaveGroup,
     patchGroupName,
     postGroupAvatar,
@@ -51,6 +54,9 @@ router.post("/:groupId/scrapbook-pages", postPage);
 router.get("/:groupId/scrapbook-pages/:pageId/items", getPageItems);
 router.post("/:groupId/scrapbook-pages/:pageId/items", uploadImage, handleUploadError, postPageItem);
 router.get("/:groupId/scrapbook-pages/:pageId/:itemId", getItem);
+router.get("/:groupId/scrapbook-pages/:pageId/:itemId/reactions", getReactions);
+router.post("/:groupId/scrapbook-pages/:pageId/:itemId/reactions", postReaction);
+router.delete("/:groupId/scrapbook-pages/:pageId/:itemId/:userId", deleteReaction);
 
 router.get("/:groupId/messages", getGroupMessages);
 router.get("/:groupId/messages/stream", streamGroupMessages);
