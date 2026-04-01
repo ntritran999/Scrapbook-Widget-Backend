@@ -5,6 +5,7 @@ import {
     GroupModel,
     MemberModel,
     MessageModel,
+    ReactionModel,
     ScrapbookItemModel,
     ScrapbookPageModel,
     SeenByModel,
@@ -761,4 +762,48 @@ export async function markMessageSeen(groupId, messageId, userId, payload = {}) 
         avatarUrl: viewerProfile.avatarUrl,
         seenAt: updatedSeen.seenAt,
     };
+}
+
+export async function listItemReactions(groupId, pageId, itemId) {
+    const snapshot = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .doc(itemId)
+        .collection("reactions")
+        .get();
+    return snapshot.docs.map(ReactionModel.fromSnapshot);
+}
+
+export async function addReaction(groupId, pageId, itemId, payload) {
+    const reaction = new ReactionModel({
+        id: payload.id,
+        type: payload.type,
+    });
+    const res = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .doc(itemId)
+        .collection("reactions")
+        .doc(reaction.id)
+        .set(reaction.toFirestore());
+    
+    return res;
+}
+
+export async function removeReaction(groupId, pageId, itemId, userId) {
+    const res = await groupsCollection
+        .doc(groupId)
+        .collection("scrapbookPages")
+        .doc(pageId)
+        .collection("items")
+        .doc(itemId)
+        .collection("reactions")
+        .doc(userId)
+        .delete();
+
+    return res;
 }

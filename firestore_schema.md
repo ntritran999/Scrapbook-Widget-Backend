@@ -88,6 +88,11 @@ items/{itemId}
 - content (map)
 - layout (map)
 
+Subcollection:
+items/{itemId}/reactions/{userId}
+
+- type (string)
+
 4. Layout Object
    Map structure for item placement on canvas:
 
