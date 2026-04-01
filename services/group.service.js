@@ -10,12 +10,181 @@ import {
     SeenByModel,
 } from "../models/index.js";
 import { uploadToCloudinary } from "./cloudinary.service.js";
+import { publishGroupMessageEvent } from "./messageRealtime.service.js";
 
 const groupsCollection = db.collection("groups");
+const usersCollection = db.collection("users");
+const INVITATION_STATUS_PENDING = "pending";
+const INVITATION_STATUS_ACCEPTED = "accepted";
+const INVITATION_STATUS_DECLINED = "declined";
+const INVITATION_SOURCE_DIRECT = "direct";
+
+function pickUserName(userData = {}, fallbackId = "") {
+    return (
+        String(userData.nickname || "").trim() ||
+        String(userData.username || "").trim() ||
+        String(userData.email || "").trim() ||
+        fallbackId
+    );
+}
+
+function buildSeenByText(seenUsers = []) {
+    if (!Array.isArray(seenUsers) || seenUsers.length === 0) {
+        return "Seen by no one";
+    }
+
+    const names = seenUsers.map((user) => user.name).filter(Boolean);
+    if (names.length === 0) {
+        return "Seen";
+    }
+
+    return `Seen by ${names.join(", ")}`;
+}
+
+async function getUserProfilesMap(userIds = []) {
+    const uniqueUserIds = Array.from(new Set((userIds || []).filter(Boolean)));
+    if (uniqueUserIds.length === 0) {
+        return new Map();
+    }
+
+    const userDocs = await Promise.all(
+        uniqueUserIds.map((userId) => usersCollection.doc(userId).get())
+    );
+
+    return new Map(
+        userDocs.map((doc) => {
+            const data = doc.exists ? (doc.data() || {}) : {};
+            return [
+                doc.id,
+                {
+                    id: doc.id,
+                    name: pickUserName(data, doc.id),
+                    avatarUrl: String(data.avatarUrl || ""),
+                },
+            ];
+        })
+    );
+}
+
+async function enrichMessagesForUi(groupId, messageDocs = []) {
+    if (!Array.isArray(messageDocs) || messageDocs.length === 0) {
+        return [];
+    }
+
+    const messages = messageDocs.map(MessageModel.fromSnapshot);
+    const messageIds = messages.map((message) => message.id).filter(Boolean);
+
+    const seenBySnapshots = await Promise.all(
+        messageIds.map((messageId) =>
+            groupsCollection.doc(groupId).collection("messages").doc(messageId).collection("seenBy").get()
+        )
+    );
+
+    const seenByMap = new Map(
+        seenBySnapshots.map((snapshot, index) => {
+            const seenRows = snapshot.docs.map(SeenByModel.fromSnapshot);
+            return [messageIds[index], seenRows];
+        })
+    );
+
+    const senderIds = messages.map((message) => message.createdBy).filter(Boolean);
+    const seenUserIds = Array.from(
+        new Set(
+            Array.from(seenByMap.values())
+                .flat()
+                .map((seen) => seen.id)
+                .filter(Boolean)
+        )
+    );
+
+    const userProfiles = await getUserProfilesMap([...senderIds, ...seenUserIds]);
+
+    return messages.map((message) => {
+        const senderProfile = userProfiles.get(message.createdBy) || {
+            id: message.createdBy,
+            name: message.createdBy,
+            avatarUrl: "",
+        };
+
+        const seenUsers = (seenByMap.get(message.id) || []).map((seen) => {
+            const profile = userProfiles.get(seen.id) || {
+                id: seen.id,
+                name: seen.id,
+                avatarUrl: "",
+            };
+
+            return {
+                id: seen.id,
+                name: profile.name,
+                avatarUrl: profile.avatarUrl,
+                seenAt: seen.seenAt,
+            };
+        });
+
+        return {
+            ...message,
+            senderId: senderProfile.id,
+            senderName: senderProfile.name,
+            senderAvatar: senderProfile.avatarUrl,
+            time: message.createdAt,
+            seenBy: seenUsers,
+            seenByText: buildSeenByText(seenUsers),
+        };
+    });
+}
+
+async function getMessageByIdEnriched(groupId, messageId) {
+    const messageDoc = await groupsCollection.doc(groupId).collection("messages").doc(messageId).get();
+    if (!messageDoc.exists) {
+        return null;
+    }
+
+    const enriched = await enrichMessagesForUi(groupId, [messageDoc]);
+    return enriched[0] || null;
+}
+
+function normalizeMemberIds(memberIds = [], ownerId) {
+    const ids = Array.isArray(memberIds) ? memberIds : [];
+    const uniqueIds = new Set(ids.filter(Boolean));
+    if (ownerId) {
+        uniqueIds.add(ownerId);
+    }
+    return Array.from(uniqueIds);
+}
+
+export async function getMemberById(groupId, userId) {
+    const doc = await groupsCollection.doc(groupId).collection("members").doc(userId).get();
+    if (!doc.exists) {
+        return null;
+    }
+    return MemberModel.fromSnapshot(doc);
+}
 
 export async function listGroups() {
     const snapshot = await groupsCollection.get();
-    return snapshot.docs.map(GroupModel.fromSnapshot);
+    const groups = snapshot.docs.map(GroupModel.fromSnapshot);
+
+    const groupsWithLatestMessage = await Promise.all(
+        groups.map(async (group) => {
+            const latestMessageSnapshot = await groupsCollection
+                .doc(group.id)
+                .collection("messages")
+                .orderBy("createdAt", "desc")
+                .limit(1)
+                .get();
+
+            const latestMessage = latestMessageSnapshot.empty
+                ? null
+                : (await enrichMessagesForUi(group.id, latestMessageSnapshot.docs))[0] || null;
+
+            return {
+                ...group,
+                latestMessage,
+            };
+        })
+    );
+
+    return groupsWithLatestMessage;
 }
 
 export async function getGroupById(groupId) {
@@ -26,6 +195,58 @@ export async function getGroupById(groupId) {
     return GroupModel.fromSnapshot(doc);
 }
 
+export async function updateGroup(groupId, payload = {}) {
+    const updates = {};
+
+    if (payload.groupName !== undefined) {
+        updates.groupName = String(payload.groupName || "").trim();
+    }
+
+    if (payload.avatarUrl !== undefined) {
+        updates.avatarUrl = String(payload.avatarUrl || "").trim();
+    }
+
+    if (Object.keys(updates).length === 0) {
+        const error = new Error("at least one updatable field is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const docRef = groupsCollection.doc(groupId);
+    await docRef.set(updates, { merge: true });
+    const updated = await docRef.get();
+    return GroupModel.fromSnapshot(updated);
+}
+
+export async function uploadAvatarForGroup(groupId, userId, fileBuffer) {
+    if (!fileBuffer) {
+        const error = new Error("avatar file is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const groupRef = groupsCollection.doc(groupId);
+    const groupDoc = await groupRef.get();
+    if (!groupDoc.exists) {
+        const error = new Error("Group not found");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const uploaded = await uploadToCloudinary(fileBuffer, "avatar", userId, groupId);
+
+    await groupRef.set(
+        {
+            avatarUrl: uploaded.secure_url,
+        },
+        { merge: true }
+    );
+
+    return {
+        avatarUrl: uploaded.secure_url,
+    };
+}
+
 export async function createGroup(payload) {
     const docRef = groupsCollection.doc();
     const group = new GroupModel({ ...payload, createdAt: FieldValue.serverTimestamp() });
@@ -34,9 +255,117 @@ export async function createGroup(payload) {
     return GroupModel.fromSnapshot(created);
 }
 
+export async function createGroupWithMembers(payload) {
+    const { groupName = "", avatarUrl = "", createdBy = "", memberIds = [] } = payload;
+    const docRef = groupsCollection.doc();
+    const groupId = docRef.id;
+    const defaultPageRef = docRef.collection("scrapbookPages").doc();
+    const selectedMemberIds = normalizeMemberIds(memberIds, createdBy).filter(
+        (memberId) => memberId !== createdBy
+    );
+
+    const batch = db.batch();
+    const group = new GroupModel({
+        groupName,
+        avatarUrl,
+        createdBy,
+        createdAt: FieldValue.serverTimestamp(),
+    });
+
+    batch.set(docRef, group.toFirestore());
+
+    const ownerMemberRef = docRef.collection("members").doc(createdBy);
+    const ownerMember = new MemberModel({
+        id: createdBy,
+        role: "admin",
+        joinedAt: FieldValue.serverTimestamp(),
+    });
+    batch.set(ownerMemberRef, ownerMember.toFirestore());
+
+    const defaultPage = new ScrapbookPageModel({
+        id: defaultPageRef.id,
+        title: "Page 1",
+        createdBy,
+        createdAt: FieldValue.serverTimestamp(),
+        templateId: null,
+        backgroundColor: "#ffffff",
+        backgroundImage: "",
+    });
+    batch.set(defaultPageRef, defaultPage.toFirestore());
+
+    const ownerWidgetRef = usersCollection.doc(createdBy).collection("widgets").doc(groupId);
+    batch.set(
+        ownerWidgetRef,
+        {
+            groupId,
+            pageId: defaultPageRef.id,
+            latestPhotoUrl: "",
+            updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    for (const invitedUserId of selectedMemberIds) {
+        const inviteRef = docRef.collection("invitations").doc(invitedUserId);
+        batch.set(
+            inviteRef,
+            {
+                groupId,
+                invitedUserId,
+                invitedBy: createdBy,
+                status: INVITATION_STATUS_PENDING,
+                source: INVITATION_SOURCE_DIRECT,
+                createdAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    }
+
+    await batch.commit();
+    const created = await docRef.get();
+    const createdDefaultPage = await defaultPageRef.get();
+    const latestPage = ScrapbookPageModel.fromSnapshot(createdDefaultPage);
+
+    return {
+        ...GroupModel.fromSnapshot(created),
+        latestPage,
+        defaultPage: latestPage,
+    };
+}
+
 export async function listMembers(groupId) {
     const snapshot = await groupsCollection.doc(groupId).collection("members").get();
-    return snapshot.docs.map(MemberModel.fromSnapshot);
+    const members = snapshot.docs.map(MemberModel.fromSnapshot);
+
+    if (members.length === 0) {
+        return [];
+    }
+
+    const usersSnapshot = await Promise.all(
+        members.map((member) => usersCollection.doc(member.id).get())
+    );
+
+    const userProfileMap = new Map(
+        usersSnapshot
+            .filter((doc) => doc.exists)
+            .map((doc) => {
+                const data = doc.data() || {};
+                return [
+                    doc.id,
+                    {
+                        username: data.username || "",
+                        avatarUrl: data.avatarUrl || "",
+                    },
+                ];
+            })
+    );
+
+    return members.map((member) => ({
+        ...member,
+        username: userProfileMap.get(member.id)?.username || "",
+        avatarUrl: userProfileMap.get(member.id)?.avatarUrl || "",
+    }));
 }
 
 export async function addOrUpdateMember(groupId, userId, payload) {
@@ -49,6 +378,195 @@ export async function addOrUpdateMember(groupId, userId, payload) {
     await docRef.set(member.toFirestore(), { merge: true });
     const updated = await docRef.get();
     return MemberModel.fromSnapshot(updated);
+}
+
+export async function addMemberAndWidget(groupId, userId, payload = {}) {
+    const memberRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+    const widgetRef = usersCollection.doc(userId).collection("widgets").doc(groupId);
+    const role = payload.role || "member";
+
+    const batch = db.batch();
+    const member = new MemberModel({
+        id: userId,
+        role,
+        joinedAt: payload.joinedAt ?? FieldValue.serverTimestamp(),
+    });
+
+    batch.set(memberRef, member.toFirestore(), { merge: true });
+    batch.set(
+        widgetRef,
+        {
+            groupId,
+            updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    await batch.commit();
+    const updated = await memberRef.get();
+    return MemberModel.fromSnapshot(updated);
+}
+
+export async function createGroupInvitation(groupId, invitedUserId, invitedBy) {
+    const inviteRef = groupsCollection
+        .doc(groupId)
+        .collection("invitations")
+        .doc(invitedUserId);
+
+    await inviteRef.set(
+        {
+            groupId,
+            invitedUserId,
+            invitedBy,
+            status: INVITATION_STATUS_PENDING,
+            source: INVITATION_SOURCE_DIRECT,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    const inviteDoc = await inviteRef.get();
+    return { id: inviteDoc.id, ...inviteDoc.data() };
+}
+
+export async function listPendingInvitationsByUser(userId) {
+    const invitesSnapshot = await db.collectionGroup("invitations").get();
+
+    const pendingInvites = invitesSnapshot.docs
+        .filter((doc) => doc.id === userId)
+        .map((doc) => ({ id: doc.id, ...doc.data() }))
+        .filter((invite) => invite.status === INVITATION_STATUS_PENDING);
+
+    const uniqueGroupIds = Array.from(new Set(pendingInvites.map((invite) => invite.groupId)));
+
+    const groupDocs = await Promise.all(
+        uniqueGroupIds.map((groupId) => groupsCollection.doc(groupId).get())
+    );
+
+    const groupMap = new Map(
+        groupDocs
+            .filter((doc) => doc.exists)
+            .map((doc) => [doc.id, { id: doc.id, ...doc.data() }])
+    );
+
+    return pendingInvites.map((invite) => ({
+        ...invite,
+        group: groupMap.get(invite.groupId) || null,
+    }));
+}
+
+export async function respondToGroupInvitation(groupId, userId, action) {
+    const inviteRef = groupsCollection
+        .doc(groupId)
+        .collection("invitations")
+        .doc(userId);
+
+    const inviteDoc = await inviteRef.get();
+    if (!inviteDoc.exists) {
+        return null;
+    }
+
+    const invite = inviteDoc.data() || {};
+    if (invite.status !== INVITATION_STATUS_PENDING) {
+        return {
+            id: inviteDoc.id,
+            ...invite,
+            alreadyResolved: true,
+        };
+    }
+
+    const batch = db.batch();
+    batch.set(
+        inviteRef,
+        {
+            status: action,
+            respondedAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    if (action === INVITATION_STATUS_ACCEPTED) {
+        const memberRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+        const member = new MemberModel({
+            id: userId,
+            role: "member",
+            joinedAt: FieldValue.serverTimestamp(),
+        });
+        batch.set(memberRef, member.toFirestore(), { merge: true });
+
+        const widgetRef = usersCollection.doc(userId).collection("widgets").doc(groupId);
+        batch.set(
+            widgetRef,
+            {
+                groupId,
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    }
+
+    await batch.commit();
+    const updatedInvite = await inviteRef.get();
+    return { id: updatedInvite.id, ...updatedInvite.data() };
+}
+
+export async function removeMemberAndWidget(groupId, userId) {
+    const groupRef = groupsCollection.doc(groupId);
+    const memberRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+    const widgetRef = usersCollection.doc(userId).collection("widgets").doc(groupId);
+
+    const groupDoc = await groupRef.get();
+    const groupData = groupDoc.exists ? (groupDoc.data() || {}) : {};
+    const isOwnerLeaving = String(groupData.createdBy || "") === String(userId || "");
+
+    const batch = db.batch();
+    batch.delete(memberRef);
+    batch.delete(widgetRef);
+    await batch.commit();
+
+    let ownershipTransferredTo = null;
+    let groupDeleted = false;
+
+    const remainingMembersSnapshot = await groupRef.collection("members").orderBy("joinedAt", "asc").get();
+
+    if (remainingMembersSnapshot.empty) {
+        await groupRef.delete();
+        groupDeleted = true;
+    } else if (isOwnerLeaving) {
+        const newOwnerId = remainingMembersSnapshot.docs[0].id;
+        await Promise.all([
+            groupRef.set({ createdBy: newOwnerId }, { merge: true }),
+            groupRef.collection("members").doc(newOwnerId).set({ role: "admin" }, { merge: true }),
+        ]);
+        ownershipTransferredTo = newOwnerId;
+    }
+
+    return {
+        removed: true,
+        groupId,
+        userId,
+        ownershipTransferredTo,
+        groupDeleted,
+    };
+}
+
+export async function listGroupsByMemberId(userId) {
+    const membersSnapshot = await db.collectionGroup("members").get();
+
+    const groupIds = new Set(
+        membersSnapshot.docs
+            .filter((doc) => doc.id === userId)
+            .map((doc) => doc.ref.parent.parent?.id)
+            .filter(Boolean)
+    );
+
+    const groupDocs = await Promise.all(
+        Array.from(groupIds).map((groupId) => groupsCollection.doc(groupId).get())
+    );
+
+    return groupDocs.filter((doc) => doc.exists).map(GroupModel.fromSnapshot);
 }
 
 export async function listScrapbookPages(groupId) {
@@ -66,6 +584,38 @@ export async function createScrapbookPage(groupId, payload) {
         createdAt: FieldValue.serverTimestamp(),
     });
     await docRef.set(page.toFirestore());
+    const created = await docRef.get();
+    return ScrapbookPageModel.fromSnapshot(created);
+}
+
+export async function createScrapbookPageAndUpdateWidgets(groupId, payload) {
+    const docRef = groupsCollection.doc(groupId).collection("scrapbookPages").doc();
+    const page = new ScrapbookPageModel({
+        ...payload,
+        createdAt: FieldValue.serverTimestamp(),
+    });
+
+    const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
+
+    const batch = db.batch();
+    batch.set(docRef, page.toFirestore());
+
+    for (const memberDoc of membersSnapshot.docs) {
+        const memberId = memberDoc.id;
+        const widgetRef = usersCollection.doc(memberId).collection("widgets").doc(groupId);
+        batch.set(
+            widgetRef,
+            {
+                groupId,
+                pageId: docRef.id,
+                latestPhotoUrl: payload.latestPhotoUrl || "",
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    }
+
+    await batch.commit();
     const created = await docRef.get();
     return ScrapbookPageModel.fromSnapshot(created);
 }
@@ -152,8 +702,12 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 }
 
 export async function listMessages(groupId) {
-    const snapshot = await groupsCollection.doc(groupId).collection("messages").get();
-    return snapshot.docs.map(MessageModel.fromSnapshot);
+    const snapshot = await groupsCollection
+        .doc(groupId)
+        .collection("messages")
+        .orderBy("createdAt", "asc")
+        .get();
+    return enrichMessagesForUi(groupId, snapshot.docs);
 }
 
 export async function createMessage(groupId, payload) {
@@ -164,7 +718,10 @@ export async function createMessage(groupId, payload) {
     });
     await docRef.set(message.toFirestore());
     const created = await docRef.get();
-    return MessageModel.fromSnapshot(created);
+    const enriched = await enrichMessagesForUi(groupId, [created]);
+    const createdMessage = enriched[0] || MessageModel.fromSnapshot(created);
+    publishGroupMessageEvent(groupId, "message.created", createdMessage);
+    return createdMessage;
 }
 
 export async function markMessageSeen(groupId, messageId, userId, payload = {}) {
@@ -183,5 +740,25 @@ export async function markMessageSeen(groupId, messageId, userId, payload = {}) 
 
     await docRef.set(seenBy.toFirestore(), { merge: true });
     const updated = await docRef.get();
-    return SeenByModel.fromSnapshot(updated);
+    const updatedSeen = SeenByModel.fromSnapshot(updated);
+
+    const profileMap = await getUserProfilesMap([userId]);
+    const viewerProfile = profileMap.get(userId) || {
+        id: userId,
+        name: userId,
+        avatarUrl: "",
+    };
+
+    const message = await getMessageByIdEnriched(groupId, messageId);
+    if (message) {
+        publishGroupMessageEvent(groupId, "message.seen", message);
+    }
+
+    return {
+        id: updatedSeen.id,
+        userId: updatedSeen.id,
+        name: viewerProfile.name,
+        avatarUrl: viewerProfile.avatarUrl,
+        seenAt: updatedSeen.seenAt,
+    };
 }

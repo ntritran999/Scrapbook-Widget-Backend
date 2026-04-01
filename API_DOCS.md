@@ -40,10 +40,14 @@ node index.js
 
 ## Common Response Codes
 
+- `400 Bad Request`: Validation error, missing required field, invalid upload payload
 - `200 OK`: Successful read/update
 - `201 Created`: Resource created
 - `401 Unauthorized`: Missing/invalid/expired Firebase ID token
+- `403 Forbidden`: Authenticated but not allowed to perform this action
 - `404 Not Found`: Route or entity not found
+- `409 Conflict`: Duplicate/conflicting state (e.g., username/member already exists)
+- `504 Gateway Timeout`: Request timed out in backend timeout wrapper
 - `500 Internal Server Error`: Unexpected server error
 
 ## Media Storage & Cloudinary Integration
@@ -53,6 +57,7 @@ All scrapbook items with file content (photos, images, etc.) are automatically u
 **File Upload Format**: Use `multipart/form-data` to upload image files. The Cloudinary integration automatically handles the upload and stores the URL in Firestore.
 
 **Features**:
+
 - Automatic file type detection and validation
 - Quality optimization for images
 - Organized folder structure in Cloudinary: `scrapbooks/{groupId}/{userId}/{itemType}`
@@ -63,6 +68,7 @@ All scrapbook items with file content (photos, images, etc.) are automatically u
 **Max File Size**: 50 MB
 
 **Requirements**:
+
 - `CLOUDINARY_CLOUD_NAME` environment variable must be set
 - `CLOUDINARY_API_KEY` environment variable must be set
 
@@ -116,7 +122,7 @@ Entity-specific 404 examples:
   "status": "string",
   "updatedAt": "date | null",
   "groupId": "string",
-  "pageId": "string",
+  "pageId": "string"
 }
 ```
 
@@ -139,6 +145,22 @@ Entity-specific 404 examples:
   "id": "userId",
   "role": "admin | member | string",
   "joinedAt": "date | null"
+}
+```
+
+### Invitation (`groups/{groupId}/invitations/{userId}`)
+
+```json
+{
+  "id": "userId",
+  "groupId": "groupId",
+  "invitedUserId": "userId",
+  "invitedBy": "userId",
+  "status": "pending | accepted | declined",
+  "source": "direct",
+  "createdAt": "date | null",
+  "updatedAt": "date | null",
+  "respondedAt": "date | null"
 }
 ```
 
@@ -481,6 +503,13 @@ Authorization: Bearer <firebase_id_token>
 
 ## Users
 
+Profile security rules:
+
+- `GET /users/:userId` and `PATCH /users/:userId` only allow self access (`:userId` must match Firebase token `uid`).
+- `PATCH /users/:userId` allows partial update for: `nickname`, `username`, `avatarUrl`, `status`, `email`.
+- If `email` is included in PATCH, it must match the email inside Firebase ID token.
+- `username` must match: 3-20 chars, letters/numbers/underscore only (`^[a-zA-Z0-9_]{3,20}$`).
+
 ### GET `/users`
 
 List all users.
@@ -500,6 +529,16 @@ Response `200`:
   }
 ]
 ```
+
+### GET `/users/discover`
+
+List users for invite UI and exclude current authenticated user.
+
+Query params:
+
+- `q` (optional): search keyword matched against `username`, `nickname`, `email`
+
+Response `200`: user array.
 
 ### GET `/users/:userId`
 
@@ -531,6 +570,41 @@ Response `404`:
 }
 ```
 
+### GET `/users/:userId/groups`
+
+List groups that the user is a member of.
+
+Response includes `latestMessage` (or `null`) for each group.
+
+Path params:
+
+- `userId`: user document id
+
+Response `200`:
+
+```json
+[
+  {
+    "id": "groupId",
+    "groupName": "My Scrapbook Group",
+    "avatarUrl": "https://example.com/group-avatar.jpg",
+    "createdBy": "userId",
+    "createdAt": null,
+    "latestMessage": {
+      "id": "messageId",
+      "content": "Hello team",
+      "createdBy": "senderUid",
+      "createdAt": "2026-04-01T09:00:00.000Z",
+      "type": "text"
+    }
+  }
+]
+```
+
+Notes:
+
+- Current implementation returns `[]` when user has no group/widgets.
+
 ### POST `/users`
 
 Create user.
@@ -558,11 +632,98 @@ Request body example:
 ```json
 {
   "nickname": "John Updated",
-  "avatarUrl": "https://example.com/new-avatar.jpg"
+  "username": "john_updated",
+  "avatarUrl": "https://example.com/new-avatar.jpg",
+  "status": "active",
+  "email": "john@example.com"
 }
 ```
 
 Response `200`: updated user object.
+
+Response `400`:
+
+```json
+{
+  "message": "username must be 3-20 characters and only contain letters, numbers, underscore"
+}
+```
+
+Response `409`:
+
+```json
+{
+  "message": "username already exists"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "forbidden"
+}
+```
+
+### GET `/users/check-username?q=new_username`
+
+Quickly check whether a username is available before saving profile changes.
+
+Query params:
+
+- `q`: username to check
+
+Response `200` (available):
+
+```json
+{
+  "available": true,
+  "valid": true
+}
+```
+
+Response `200` (taken):
+
+```json
+{
+  "available": false,
+  "valid": true
+}
+```
+
+Response `200` (invalid format):
+
+```json
+{
+  "available": false,
+  "valid": false,
+  "reason": "username must be 3-20 characters and only contain letters, numbers, underscore"
+}
+```
+
+### POST `/users/avatar`
+
+Upload avatar image using `multipart/form-data`, then update `users/{uid}.avatarUrl` for the authenticated user and return hosted URL.
+
+Form-data fields:
+
+- `file`: avatar image binary
+
+Response `200`:
+
+```json
+{
+  "avatarUrl": "https://..."
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "User not found"
+}
+```
 
 ### GET `/users/:userId/widgets`
 
@@ -604,6 +765,50 @@ Response `200`: widget object.
 
 List all groups.
 
+Response includes `latestMessage` (or `null`) for each group.
+
+Response `200`:
+
+```json
+[
+  {
+    "id": "groupId",
+    "groupName": "My Scrapbook Group",
+    "avatarUrl": "https://example.com/group-avatar.jpg",
+    "createdBy": "ownerUid",
+    "createdAt": null,
+    "latestMessage": {
+      "id": "messageId",
+      "content": "Hello team",
+      "createdBy": "senderUid",
+      "createdAt": "2026-04-01T09:00:00.000Z",
+      "type": "text",
+      "senderId": "senderUid",
+      "senderName": "John",
+      "senderAvatar": "https://example.com/avatar.jpg",
+      "time": "2026-04-01T09:00:00.000Z",
+      "seenBy": [
+        {
+          "id": "viewerUid",
+          "name": "Alice",
+          "avatarUrl": "https://example.com/alice.jpg",
+          "seenAt": "2026-04-01T09:01:20.000Z"
+        }
+      ],
+      "seenByText": "Seen by Alice"
+    }
+  },
+  {
+    "id": "groupId2",
+    "groupName": "Empty Group",
+    "avatarUrl": "",
+    "createdBy": "ownerUid",
+    "createdAt": null,
+    "latestMessage": null
+  }
+]
+```
+
 ### GET `/groups/:groupId`
 
 Get group by id.
@@ -630,29 +835,268 @@ Request body:
 {
   "groupName": "My Scrapbook Group",
   "avatarUrl": "https://example.com/group-avatar.jpg",
-  "createdBy": "userId"
+  "memberIds": ["userIdA", "userIdB"]
 }
 ```
 
-Response `201`: group object.
+Behavior:
 
-### GET `/groups/:groupId/members`
+- `createdBy` is inferred from Firebase token (`req.authUser.uid`).
+- Only owner is added immediately to `members` with role `admin`.
+- Users in `memberIds` are created as `pending` invitations, not immediate members.
+- System automatically creates one default scrapbook page for the new group:
+  - `title`: `Page 1`
+  - `templateId`: `null`
+  - `backgroundColor`: `#ffffff`
+  - `backgroundImage`: ``
+- Owner widget is initialized with this default `pageId`.
+- In response, this page is returned as `latestPage` (`defaultPage` is kept as backward-compatible alias).
 
-List members in group.
+Response `201`:
 
-### PUT `/groups/:groupId/members/:userId`
+```json
+{
+  "id": "groupId",
+  "groupName": "My Scrapbook Group",
+  "avatarUrl": "https://example.com/group-avatar.jpg",
+  "createdBy": "ownerUid",
+  "createdAt": "2026-04-01T10:00:00.000Z",
+  "latestPage": {
+    "id": "pageId",
+    "title": "Page 1",
+    "createdBy": "ownerUid",
+    "createdAt": "2026-04-01T10:00:00.000Z",
+    "templateId": null,
+    "backgroundColor": "#ffffff",
+    "backgroundImage": ""
+  },
+  "defaultPage": {
+    "id": "pageId",
+    "title": "Page 1",
+    "createdBy": "ownerUid",
+    "createdAt": "2026-04-01T10:00:00.000Z",
+    "templateId": null,
+    "backgroundColor": "#ffffff",
+    "backgroundImage": ""
+  }
+}
+```
 
-Add or update a group member.
+### PATCH `/groups/:groupId/name`
+
+Edit group name.
+
+Permissions:
+
+- Any existing group member can update.
 
 Request body:
 
 ```json
 {
-  "role": "member"
+  "groupName": "New Group Name"
 }
 ```
 
+Response `200`: updated group object.
+
+Response `400`:
+
+```json
+{
+  "message": "groupName is required"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "groupName cannot be empty"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "Only group members can update group"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Group not found"
+}
+```
+
+### POST `/groups/:groupId/avatar`
+
+Upload group avatar image using `multipart/form-data`, then update `groups/{groupId}.avatarUrl` and return hosted URL.
+
+Permissions:
+
+- Any existing group member can update.
+
+Form-data fields:
+
+- `file`: avatar image binary
+
+Response `200`:
+
+```json
+{
+  "avatarUrl": "https://..."
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "avatar file is required"
+}
+```
+
+Response `400` (invalid file type):
+
+```json
+{
+  "message": "Only image files are allowed. Received: application/pdf"
+}
+```
+
+Response `400` (file too large):
+
+```json
+{
+  "message": "File is too large (max 50MB)"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "Only group members can update group"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Group not found"
+}
+```
+
+### GET `/groups/:groupId/members`
+
+List members in group.
+
+Response `200`:
+
+```json
+[
+  {
+    "id": "userId",
+    "role": "admin",
+    "joinedAt": null,
+    "username": "john_doe",
+    "avatarUrl": "https://example.com/avatar.jpg"
+  }
+]
+```
+
+### PUT `/groups/:groupId/members/:userId`
+
+Add a user directly as member.
+
+Permissions:
+
+- Any existing group member can add.
+- Owner cannot be added again.
+
 Response `200`: member object.
+
+### DELETE `/groups/:groupId/members/:userId`
+
+Remove a member from group and delete corresponding widget.
+
+Permissions:
+
+- Admin only.
+- Owner cannot be removed.
+
+### POST `/groups/:groupId/leave`
+
+Current user leaves group and own widget is deleted.
+
+Rules:
+
+- Owner can leave.
+- If owner leaves and at least one member remains, ownership is transferred to the first remaining member.
+- If no members remain after leaving, the group is deleted.
+
+Response `200`:
+
+```json
+{
+  "removed": true,
+  "groupId": "groupId",
+  "userId": "userId",
+  "ownershipTransferredTo": "newOwnerUserId",
+  "groupDeleted": false
+}
+```
+
+When no ownership transfer happens, `ownershipTransferredTo` is `null`.
+When no members remain after leave, `groupDeleted` is `true`.
+
+### POST `/groups/:groupId/invitations`
+
+Create or update pending invitation for a target user.
+
+Request body:
+
+```json
+{
+  "userId": "targetUserId"
+}
+```
+
+Permissions:
+
+- Any existing group member can invite.
+- If target is already member -> `409`.
+
+Response `201`: invitation object.
+
+### GET `/groups/invitations/me`
+
+List pending invitations for current authenticated user.
+
+Response `200`: invitation array with attached `group` info.
+
+### POST `/groups/:groupId/invitations/accept`
+
+Accept my invitation to a group.
+
+Behavior:
+
+- Invitation status -> `accepted`
+- Create `groups/{groupId}/members/{myId}` role `member`
+- Create/update `users/{myId}/widgets/{groupId}`
+
+### POST `/groups/:groupId/invitations/decline`
+
+Decline my invitation to a group.
+
+Behavior:
+
+- Invitation status -> `declined`
 
 ### GET `/groups/:groupId/scrapbook-pages`
 
@@ -667,18 +1111,42 @@ Request body:
 ```json
 {
   "title": "Weekend Memories",
-  "createdBy": "userId",
   "templateId": "templateId",
   "backgroundColor": "#ffffff",
   "backgroundImage": ""
 }
 ```
 
+Behavior:
+
+- `createdBy` is inferred from Firebase token.
+- After page created, widgets of all group members are updated (`pageId`, `latestPhotoUrl`, `updatedAt`).
+
 Response `201`: scrapbook page object.
 
 ### GET `/groups/:groupId/scrapbook-pages/:pageId/items`
 
 List items in a scrapbook page.
+
+### GET `/groups/:groupId/scrapbook-pages/:pageId/:itemId`
+
+Get one item in a scrapbook page by item id.
+
+Path params:
+
+- `groupId`: group document id
+- `pageId`: scrapbook page document id
+- `itemId`: scrapbook item document id
+
+Response `200`: scrapbook item object.
+
+Response `404`:
+
+```json
+{
+  "message": "Item not found"
+}
+```
 
 ### POST `/groups/:groupId/scrapbook-pages/:pageId/items`
 
@@ -717,7 +1185,7 @@ Use form-data with the following fields:
 
 - `type`: "photo" (or "sticker")
 - `createdBy`: userId (string)
-- `image`: Image file (binary file - JPEG, PNG, GIF, WebP)
+- `file`: Image file (binary file - JPEG, PNG, GIF, WebP)
 - `layout`: JSON object with positioning
 - `content` (optional): Additional JSON properties for the content object
 
@@ -727,11 +1195,11 @@ Example using curl:
 curl -X POST "http://localhost:3000/api/v1/groups/groupId/scrapbook-pages/pageId/items" \
   -F "type=photo" \
   -F "createdBy=userId" \
-  -F "image=@/path/to/image.jpg" \
+  -F "file=@/path/to/image.jpg" \
   -F 'layout={"x":5,"y":10,"width":200,"height":150,"rotation":0,"scale":1,"zIndex":1}'
 ```
 
-**Response `201`**: The `content.url` field contains the Cloudinary URL of the uploaded item.
+**Response `201`**: The `content.photoUrl` field contains the Cloudinary URL of the uploaded item.
 
 Response example:
 
@@ -742,7 +1210,7 @@ Response example:
   "createdBy": "userId",
   "createdAt": "2024-01-15T10:30:00Z",
   "content": {
-    "url": "https://res.cloudinary.com/your-cloud-name/image/upload/...",
+    "photoUrl": "https://res.cloudinary.com/your-cloud-name/image/upload/...",
     "cloudinaryPublicId": "scrapbooks/groupId/userId/photo/1705316400000"
   },
   "layout": {
@@ -796,6 +1264,102 @@ Response example:
 
 List group messages.
 
+Response `200`:
+
+```json
+[
+  {
+    "id": "messageId",
+    "content": "Hello team",
+    "createdBy": "senderUid",
+    "createdAt": "2026-04-01T09:00:00.000Z",
+    "type": "text",
+    "senderId": "senderUid",
+    "senderName": "John",
+    "senderAvatar": "https://example.com/avatar.jpg",
+    "time": "2026-04-01T09:00:00.000Z",
+    "seenBy": [
+      {
+        "id": "viewerUid",
+        "name": "Alice",
+        "avatarUrl": "https://example.com/alice.jpg",
+        "seenAt": "2026-04-01T09:01:20.000Z"
+      }
+    ],
+    "seenByText": "Seen by Alice"
+  }
+]
+```
+
+### GET `/groups/:groupId/messages/stream`
+
+Real-time message stream using Server-Sent Events (SSE).
+
+Permissions:
+
+- Any existing group member can connect.
+
+Headers:
+
+```http
+Accept: text/event-stream
+Authorization: Bearer <firebase_id_token>
+```
+
+Connection notes:
+
+- Keep the HTTP connection open.
+- Server sends heartbeat comments periodically.
+- Reconnect on disconnect from client side.
+
+Events:
+
+- `stream.ready`: stream connection established.
+- `messages.initial`: initial full message list (same shape as `GET /groups/:groupId/messages`).
+- `message.created`: a new created message object.
+- `message.seen`: updated message object after seen status changes.
+
+Example event payload (`message.created` / `message.seen`):
+
+```json
+{
+  "id": "messageId",
+  "content": "Hello team",
+  "createdBy": "senderUid",
+  "createdAt": "2026-04-01T09:00:00.000Z",
+  "type": "text",
+  "senderId": "senderUid",
+  "senderName": "John",
+  "senderAvatar": "https://example.com/avatar.jpg",
+  "time": "2026-04-01T09:00:00.000Z",
+  "seenBy": [
+    {
+      "id": "viewerUid",
+      "name": "Alice",
+      "avatarUrl": "https://example.com/alice.jpg",
+      "seenAt": "2026-04-01T09:01:20.000Z"
+    }
+  ],
+  "seenByText": "Seen by Alice"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "Only group members can access messages"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Group not found"
+}
+```
+
 ### POST `/groups/:groupId/messages`
 
 Create message.
@@ -810,7 +1374,7 @@ Request body:
 }
 ```
 
-Response `201`: message object.
+Response `201`: created message object (same enriched shape as `GET /groups/:groupId/messages`).
 
 ### PUT `/groups/:groupId/messages/:messageId/seen-by/:userId`
 
@@ -822,7 +1386,17 @@ Request body:
 {}
 ```
 
-Response `200`: seenBy object.
+Response `200`:
+
+```json
+{
+  "id": "viewerUid",
+  "userId": "viewerUid",
+  "name": "Alice",
+  "avatarUrl": "https://example.com/alice.jpg",
+  "seenAt": "2026-04-01T09:01:20.000Z"
+}
+```
 
 ## Templates
 
@@ -894,6 +1468,25 @@ Get groups:
 
 ```bash
 curl "http://localhost:3000/api/v1/groups"
+```
+
+Update group name:
+
+```bash
+curl -X PATCH "http://localhost:3000/api/v1/groups/<groupId>/name" \
+  -H "Authorization: Bearer <firebase_id_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "groupName": "Weekend Memories"
+  }'
+```
+
+Upload group avatar:
+
+```bash
+curl -X POST "http://localhost:3000/api/v1/groups/<groupId>/avatar" \
+  -H "Authorization: Bearer <firebase_id_token>" \
+  -F "file=@/path/to/group-avatar.jpg"
 ```
 
 ## Notes

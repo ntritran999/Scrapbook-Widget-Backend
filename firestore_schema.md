@@ -22,6 +22,10 @@ widgets/{friendId}
 - groupId (string)
 - pageId (string)
 
+Note:
+
+- For group widgets, `friendId` is currently used as `groupId` document id in API implementation.
+
 2. Groups Collection
    Path: groups/{groupId}
 
@@ -37,6 +41,31 @@ members/{userId}
 
 - role (string): admin / member
 - joinedAt (timestamp)
+
+Subcollection:
+invitations/{userId}
+
+- groupId (string)
+- invitedUserId (string)
+- invitedBy (string)
+- status (string): pending / accepted / declined
+- source (string): direct
+- createdAt (timestamp)
+- updatedAt (timestamp)
+- respondedAt (timestamp, optional)
+
+Behavior Notes:
+
+- When creating a group, system auto-creates one default scrapbook page in
+  `groups/{groupId}/scrapbookPages/{pageId}` with:
+  - title = `Page 1`
+  - templateId = `null`
+  - backgroundColor = `#ffffff`
+  - backgroundImage = ``
+- Owner widget `users/{ownerId}/widgets/{groupId}` is initialized with this `pageId`.
+- If owner leaves group and there is at least one remaining member, `groups/{groupId}.createdBy`
+  is transferred to the first remaining member.
+- If the last member leaves, `groups/{groupId}` is deleted.
 
 3. Scrapbook Pages
    Path: groups/{groupId}/scrapbookPages/{pageId}
@@ -75,6 +104,11 @@ items/{itemId}
 
 - photoUrl (string)
 - caption (string)
+
+Note:
+
+- API response fields like `latestPage` / `defaultPage` are response-level aliases.
+  They are not persisted as fields in `groups/{groupId}` documents.
 
 Sticker item:
 
@@ -137,6 +171,8 @@ groups
 ├── createdBy
 ├── createdAt
 ├── members
+│ └── userId
+├── invitations
 │ └── userId
 ├── scrapbookPages
 │ └── pageId
