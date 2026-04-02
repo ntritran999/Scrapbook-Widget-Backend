@@ -54,13 +54,14 @@ async function getMembersFaceVectors(groupId) {
 }
 
 // Helper: Match face embeddings against group members
-async function matchFaceEmbeddings(groupId, embeddings, threshold = 0.65) {
+async function matchFaceEmbeddings(groupId, embeddings, threshold = 0.4) {
     try {
         if (!Array.isArray(embeddings) || embeddings.length === 0) {
             return [];
         }
 
         const memberFaceVectors = await getMembersFaceVectors(groupId);
+        console.log(`Found ${memberFaceVectors.length} member face vectors for group ${groupId}`);
         if (memberFaceVectors.length === 0) {
             return [];
         }
@@ -76,6 +77,7 @@ async function matchFaceEmbeddings(groupId, embeddings, threshold = 0.65) {
             // Compare against each member's face vector
             for (const memberFace of memberFaceVectors) {
                 const similarity = cosineSimilarity(embedding, memberFace.faceVector);
+                console.log(`Similarity with user ${memberFace.userId}: ${similarity.toFixed(4)}`);
                 if (similarity > threshold) {
                     taggedUserIds.add(memberFace.userId);
                 }
@@ -209,6 +211,7 @@ export async function createScrapbookItem(groupId, pageId, payload) {
         // Handle face embeddings for automatic tagging
         let taggedUserIds = [];
         if (payload.faceEmbeddings) {
+            console.log("Processing face embeddings for automatic tagging...");
             try {
                 // Parse faceEmbeddings from form-data (stringified JSON)
                 let embeddings = payload.faceEmbeddings;
