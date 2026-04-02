@@ -1,12 +1,16 @@
 import { Router } from "express";
 
+import { uploadImage, handleUploadError } from "../middleware/upload.js";
 import { requireAuth } from "../middlewares/auth.middleware.js";
 import {
+    checkUsername,
     getUser,
+    getUsersForInviteController,
     getUsers,
     getUserGroups,
     getWidgets,
     patchUser,
+    postAvatar,
     postUser,
     putWidget,
     postEnrollFace,
@@ -15,6 +19,10 @@ import {
 const router = Router();
 
 router.use(requireAuth);
+
+router.get("/check-username", checkUsername);
+router.get("/discover", getUsersForInviteController);
+router.post("/avatar", uploadImage, handleUploadError, postAvatar);
 
 router.get("/", getUsers);
 router.get("/:userId", getUser);

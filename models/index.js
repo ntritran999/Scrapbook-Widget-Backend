@@ -5,3 +5,4 @@ export { ScrapbookItemModel } from "./scrapbookItem.model.js";
 export { ScrapbookPageModel } from "./scrapbookPage.model.js";
 export { TemplateItemModel, TemplateModel } from "./template.model.js";
 export { UserModel, WidgetModel } from "./user.model.js";
+export { ReactionModel } from "./reaction.model.js";

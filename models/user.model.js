@@ -29,6 +29,8 @@ export class WidgetModel {
             senderAvatar: this.senderAvatar,
             status: this.status,
             updatedAt: this.updatedAt,
+            groupId: this.groupId,
+            pageId: this.pageId,
         };
     }
 }

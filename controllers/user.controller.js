@@ -1,13 +1,20 @@
 import {
+    checkUsernameAvailability,
     createUser,
     getUserById,
     getGroupsByUserId,
+    listUsersForInvite,
     listUsers,
     listUserWidgets,
+    uploadAvatarForUser,
     updateUser,
     upsertUserWidget,
     enrollFace,
 } from "../services/user.service.js";
+
+function ensureSelfAccess(req, userId) {
+    return req.authUser?.uid === userId;
+}
 
 export async function getUsers(req, res, next) {
     try {
@@ -18,8 +25,21 @@ export async function getUsers(req, res, next) {
     }
 }
 
+export async function getUsersForInviteController(req, res, next) {
+    try {
+        const users = await listUsersForInvite(req.authUser.uid, req.query.q);
+        return res.json(users);
+    } catch (error) {
+        return next(error);
+    }
+}
+
 export async function getUser(req, res, next) {
     try {
+        if (!ensureSelfAccess(req, req.params.userId)) {
+            return res.status(403).json({ message: "forbidden" });
+        }
+
         const user = await getUserById(req.params.userId);
         if (!user) {
             return res.status(404).json({ message: "User not found" });
@@ -53,7 +73,11 @@ export async function postUser(req, res, next) {
 
 export async function patchUser(req, res, next) {
     try {
-        const user = await updateUser(req.params.userId, req.body);
+        if (!ensureSelfAccess(req, req.params.userId)) {
+            return res.status(403).json({ message: "forbidden" });
+        }
+
+        const user = await updateUser(req.params.userId, req.body, req.authUser);
         res.json(user);
     } catch (error) {
         next(error);
@@ -83,6 +107,28 @@ export async function postEnrollFace(req, res, next) {
             return res.status(error.statusCode).json({ message: error.message });
         }
         next(error);
+    }
+}
+
+export async function checkUsername(req, res, next) {
+    try {
+        const result = await checkUsernameAvailability(req.query.q, req.authUser?.uid);
+        return res.json(result);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function postAvatar(req, res, next) {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ message: "avatar file is required" });
+        }
+
+        const result = await uploadAvatarForUser(req.authUser?.uid, req.file.buffer);
+        return res.status(200).json(result);
+    } catch (error) {
+        return next(error);
     }
 }
 
