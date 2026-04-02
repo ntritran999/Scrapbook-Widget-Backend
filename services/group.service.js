@@ -12,6 +12,82 @@ import {
 import { uploadToCloudinary } from "./cloudinary.service.js";
 
 const groupsCollection = db.collection("groups");
+const usersCollection = db.collection("users");
+
+// Utility: Calculate Cosine Similarity between two vectors
+function cosineSimilarity(vecA, vecB) {
+    if (vecA.length !== vecB.length) return 0;
+    let dotProduct = 0, normA = 0, normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Helper: Get all members' face vectors from group
+async function getMembersFaceVectors(groupId) {
+    try {
+        const members = await listMembers(groupId);
+        const memberFaceVectors = [];
+
+        for (const member of members) {
+            const userDoc = await usersCollection.doc(member.id).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+                if (userData.faceVector && Array.isArray(userData.faceVector)) {
+                    memberFaceVectors.push({
+                        userId: member.id,
+                        faceVector: userData.faceVector,
+                    });
+                }
+            }
+        }
+
+        return memberFaceVectors;
+    } catch (error) {
+        console.error("Error fetching members' face vectors:", error);
+        return [];
+    }
+}
+
+// Helper: Match face embeddings against group members
+async function matchFaceEmbeddings(groupId, embeddings, threshold = 0.65) {
+    try {
+        if (!Array.isArray(embeddings) || embeddings.length === 0) {
+            return [];
+        }
+
+        const memberFaceVectors = await getMembersFaceVectors(groupId);
+        if (memberFaceVectors.length === 0) {
+            return [];
+        }
+
+        const taggedUserIds = new Set();
+
+        // For each embedding from the mobile app
+        for (const embedding of embeddings) {
+            if (!Array.isArray(embedding) || embedding.length !== 192) {
+                continue; // Skip invalid embeddings
+            }
+
+            // Compare against each member's face vector
+            for (const memberFace of memberFaceVectors) {
+                const similarity = cosineSimilarity(embedding, memberFace.faceVector);
+                if (similarity > threshold) {
+                    taggedUserIds.add(memberFace.userId);
+                }
+            }
+        }
+
+        return Array.from(taggedUserIds);
+    } catch (error) {
+        console.error("Error matching face embeddings:", error);
+        return [];
+    }
+}
 
 export async function listGroups() {
     const snapshot = await groupsCollection.get();
@@ -130,6 +206,26 @@ export async function createScrapbookItem(groupId, pageId, payload) {
             };
         }
 
+        // Handle face embeddings for automatic tagging
+        let taggedUserIds = [];
+        if (payload.faceEmbeddings) {
+            try {
+                // Parse faceEmbeddings from form-data (stringified JSON)
+                let embeddings = payload.faceEmbeddings;
+                if (typeof embeddings === 'string') {
+                    embeddings = JSON.parse(embeddings);
+                }
+
+                // Validate it's an array
+                if (Array.isArray(embeddings)) {
+                    taggedUserIds = await matchFaceEmbeddings(groupId, embeddings);
+                }
+            } catch (error) {
+                console.warn("Warning: Failed to process face embeddings:", error.message);
+                // Continue without face tagging
+            }
+        }
+
         const docRef = groupsCollection
             .doc(groupId)
             .collection("scrapbookPages")
@@ -139,6 +235,7 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 
         const item = new ScrapbookItemModel({
             ...processedPayload,
+            taggedUserIds: taggedUserIds,
             createdAt: FieldValue.serverTimestamp(),
         });
 

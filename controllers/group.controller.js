@@ -120,6 +120,12 @@ export async function postPageItem(req, res, next) {
             };
         }
 
+        // Pass faceEmbeddings from request body to service
+        // faceEmbeddings format: stringified JSON array of embeddings
+        if (req.body.faceEmbeddings) {
+            payload.faceEmbeddings = req.body.faceEmbeddings;
+        }
+
         const item = await createScrapbookItem(
             req.params.groupId,
             req.params.pageId,

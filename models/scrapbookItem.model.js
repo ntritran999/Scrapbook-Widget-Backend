@@ -9,6 +9,7 @@ export class ScrapbookItemModel {
         createdAt = null,
         content = {},
         layout = {},
+        taggedUserIds = [],
     } = {}) {
         this.id = id;
         this.type = type;
@@ -16,6 +17,7 @@ export class ScrapbookItemModel {
         this.createdAt = normalizeTimestamp(createdAt);
         this.content = content;
         this.layout = LayoutModel.fromFirestore(layout);
+        this.taggedUserIds = taggedUserIds;
     }
 
     static fromSnapshot(snapshot) {
@@ -29,6 +31,7 @@ export class ScrapbookItemModel {
             createdAt: this.createdAt,
             content: this.content,
             layout: this.layout.toFirestore(),
+            taggedUserIds: this.taggedUserIds,
         };
     }
 }

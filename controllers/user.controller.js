@@ -6,6 +6,7 @@ import {
     listUserWidgets,
     updateUser,
     upsertUserWidget,
+    enrollFace,
 } from "../services/user.service.js";
 
 export async function getUsers(req, res, next) {
@@ -55,6 +56,32 @@ export async function patchUser(req, res, next) {
         const user = await updateUser(req.params.userId, req.body);
         res.json(user);
     } catch (error) {
+        next(error);
+    }
+}
+
+export async function postEnrollFace(req, res, next) {
+    try {
+        // Verify user is enrolling their own face
+        if (req.authUser.uid !== req.params.userId) {
+            return res.status(403).json({ message: "You can only enroll your own face" });
+        }
+
+        const { faceVector } = req.body;
+
+        if (!faceVector) {
+            return res.status(400).json({ message: "faceVector is required" });
+        }
+
+        const user = await enrollFace(req.params.userId, faceVector);
+        res.status(200).json({
+            message: "Face enrolled successfully",
+            userId: user.id,
+        });
+    } catch (error) {
+        if (error?.statusCode) {
+            return res.status(error.statusCode).json({ message: error.message });
+        }
         next(error);
     }
 }
