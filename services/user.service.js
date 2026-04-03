@@ -194,6 +194,43 @@ export async function updateUser(userId, payload, authUser = null) {
     return UserModel.fromSnapshot(updated);
 }
 
+export async function enrollFace(userId, faceVector) {
+    try {
+        // Validate face vector
+        if (!Array.isArray(faceVector) || faceVector.length !== 192) {
+            const error = new Error("Face vector must be an array of 192 numbers");
+            error.statusCode = 400;
+            throw error;
+        }
+
+        // Validate all elements are numbers
+        if (!faceVector.every(val => typeof val === 'number')) {
+            const error = new Error("All face vector elements must be numbers");
+            error.statusCode = 400;
+            throw error;
+        }
+
+        const docRef = usersCollection.doc(userId);
+        
+        // Update user with face vector
+        await docRef.set(
+            { faceVector: faceVector },
+            { merge: true }
+        );
+
+        const updated = await docRef.get();
+        if (!updated.exists) {
+            const error = new Error("User not found");
+            error.statusCode = 404;
+            throw error;
+        }
+
+        return UserModel.fromSnapshot(updated);
+    } catch (error) {
+        throw error;
+    }
+}
+
 export async function checkUsernameAvailability(usernameQuery, currentUserId = null) {
     const username = String(usernameQuery || "").trim();
     if (!username) {

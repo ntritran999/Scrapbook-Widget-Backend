@@ -44,6 +44,7 @@ export class UserModel {
         avatarUrl = "",
         createdAt = null,
         status = "active",
+        faceVector = null,
     } = {}) {
         this.id = id;
         this.username = username;
@@ -52,6 +53,7 @@ export class UserModel {
         this.avatarUrl = avatarUrl;
         this.createdAt = normalizeTimestamp(createdAt);
         this.status = status;
+        this.faceVector = faceVector;
     }
 
     static fromSnapshot(snapshot) {
@@ -66,6 +68,7 @@ export class UserModel {
             avatarUrl: this.avatarUrl,
             createdAt: this.createdAt,
             status: this.status,
+            ...(this.faceVector && { faceVector: this.faceVector }),
         };
     }
 }

@@ -11,6 +11,7 @@ import {
     getPageItems,
     getPages,
     getItem,
+    getTodayMemory,
     getReactions,
     postReaction,
     deleteReaction,
@@ -40,6 +41,7 @@ router.get("/:groupId", getGroup);
 router.post("/", postGroup);
 router.patch("/:groupId/name", patchGroupName);
 router.post("/:groupId/avatar", uploadImage, handleUploadError, postGroupAvatar);
+router.get("/:groupId/today-memory", getTodayMemory);
 
 router.get("/:groupId/members", getGroupMembers);
 router.put("/:groupId/members/:userId", putGroupMember);

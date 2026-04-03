@@ -14,6 +14,7 @@ import {
     listPendingInvitationsByUser,
     listScrapbookItems,
     listScrapbookPages,
+    listTodayMemoryItems,
     markMessageSeen,
     removeMemberAndWidget,
     respondToGroupInvitation,
@@ -370,6 +371,28 @@ export async function getPageItems(req, res, next) {
     }
 }
 
+export async function getTodayMemory(req, res, next) {
+    try {
+        const { groupId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can access memories" });
+        }
+
+        const memories = await listTodayMemoryItems(groupId);
+        return res.json(memories);
+    } catch (error) {
+        return next(error);
+    }
+}
+
 export async function getItem(req, res, next) {
     try {
         const item = await getItemById(req.params.groupId, req.params.pageId, req.params.itemId);
@@ -396,6 +419,12 @@ export async function postPageItem(req, res, next) {
                 mimetype: req.file.mimetype,
             };
         }
+
+        const itemData = JSON.parse(req.body.payload);
+
+        // Pass faceEmbeddings from request body to service
+        // faceEmbeddings format: stringified JSON array of embeddings
+        payload.faceEmbeddings = itemData.faceEmbeddings;
 
         const item = await createScrapbookItem(
             req.params.groupId,

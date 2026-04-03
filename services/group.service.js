@@ -15,6 +15,84 @@ import { publishGroupMessageEvent } from "./messageRealtime.service.js";
 
 const groupsCollection = db.collection("groups");
 const usersCollection = db.collection("users");
+const TODAY_MEMORY_FALLBACK_LIMIT = 10;
+
+// Utility: Calculate Cosine Similarity between two vectors
+function cosineSimilarity(vecA, vecB) {
+    if (vecA.length !== vecB.length) return 0;
+    let dotProduct = 0, normA = 0, normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Helper: Get all members' face vectors from group
+async function getMembersFaceVectors(groupId) {
+    try {
+        const members = await listMembers(groupId);
+        const memberFaceVectors = [];
+
+        for (const member of members) {
+            const userDoc = await usersCollection.doc(member.id).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+                if (userData.faceVector && Array.isArray(userData.faceVector)) {
+                    memberFaceVectors.push({
+                        userId: member.id,
+                        faceVector: userData.faceVector,
+                    });
+                }
+            }
+        }
+
+        return memberFaceVectors;
+    } catch (error) {
+        console.error("Error fetching members' face vectors:", error);
+        return [];
+    }
+}
+
+// Helper: Match face embeddings against group members
+async function matchFaceEmbeddings(groupId, embeddings, threshold = 0.4) {
+    try {
+        if (!Array.isArray(embeddings) || embeddings.length === 0) {
+            return [];
+        }
+
+        const memberFaceVectors = await getMembersFaceVectors(groupId);
+        console.log(`Found ${memberFaceVectors.length} member face vectors for group ${groupId}`);
+        if (memberFaceVectors.length === 0) {
+            return [];
+        }
+
+        const taggedUserIds = new Set();
+
+        // For each embedding from the mobile app
+        for (const embedding of embeddings) {
+            if (!Array.isArray(embedding) || embedding.length !== 192) {
+                continue; // Skip invalid embeddings
+            }
+
+            // Compare against each member's face vector
+            for (const memberFace of memberFaceVectors) {
+                const similarity = cosineSimilarity(embedding, memberFace.faceVector);
+                console.log(`Similarity with user ${memberFace.userId}: ${similarity.toFixed(4)}`);
+                if (similarity > threshold) {
+                    taggedUserIds.add(memberFace.userId);
+                }
+            }
+        }
+
+        return Array.from(taggedUserIds);
+    } catch (error) {
+        console.error("Error matching face embeddings:", error);
+        return [];
+    }
+}
 const INVITATION_STATUS_PENDING = "pending";
 const INVITATION_STATUS_ACCEPTED = "accepted";
 const INVITATION_STATUS_DECLINED = "declined";
@@ -631,6 +709,156 @@ export async function listScrapbookItems(groupId, pageId) {
     return snapshot.docs.map(ScrapbookItemModel.fromSnapshot);
 }
 
+function normalizeTaggedUserIds(taggedUserIds = []) {
+    if (!Array.isArray(taggedUserIds)) {
+        return [];
+    }
+
+    return Array.from(
+        new Set(
+            taggedUserIds
+                .map((userId) => String(userId || "").trim())
+                .filter(Boolean)
+        )
+    );
+}
+
+function isOnThisDayFromPreviousYears(date, referenceDate = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return false;
+    }
+
+    const isMatch = (
+        date.getUTCMonth() === referenceDate.getUTCMonth() &&
+        date.getUTCDate() === referenceDate.getUTCDate() &&
+        date.getUTCFullYear() < referenceDate.getUTCFullYear()
+    );
+
+    if (isMatch) {
+        console.log(`[TODAY_MEMORY] isOnThisDay: MATCH - ${date.toISOString()} matches ${referenceDate.toISOString()} (month/day only)`);
+    }
+
+    return isMatch;
+}
+
+async function buildTaggedUsernameMap(userIds = []) {
+    const uniqueUserIds = Array.from(new Set((userIds || []).filter(Boolean)));
+
+    if (uniqueUserIds.length === 0) {
+        return new Map();
+    }
+
+    const userDocs = await Promise.all(
+        uniqueUserIds.map((userId) => usersCollection.doc(userId).get())
+    );
+
+    const usernameMap = new Map();
+    for (const userDoc of userDocs) {
+        if (!userDoc.exists) {
+            continue;
+        }
+
+        const username = String(userDoc.data()?.username || "").trim();
+        if (!username) {
+            continue;
+        }
+
+        usernameMap.set(userDoc.id, username);
+    }
+
+    return usernameMap;
+}
+
+export async function listTodayMemoryItems(groupId, limit = TODAY_MEMORY_FALLBACK_LIMIT) {
+    const pages = await listScrapbookPages(groupId);
+    if (pages.length === 0) {
+        console.log(`[TODAY_MEMORY] No pages found, returning empty`);
+        return [];
+    }
+
+    const pageItems = await Promise.all(
+        pages.map((page) => listScrapbookItems(groupId, page.id))
+    );
+    const totalItems = pageItems.flat().length;
+
+    const taggedPhotoItems = pageItems
+        .flat()
+        .map((item) => {
+            let dateString = null;
+
+            if (item.createdAt) {
+                const dateObj = typeof item.createdAt.toDate === 'function'
+                    ? item.createdAt.toDate()
+                    : new Date(item.createdAt);
+
+                if (!isNaN(dateObj.getTime())) {
+                    dateString = dateObj.toLocaleDateString('en-US', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric'
+                    });
+                }
+            }
+            console.log(`[TODAY_MEMORY] Processing item ${item.id}: type=${item.type}, createdAt=${dateString}, taggedUserIds=${JSON.stringify(item.taggedUserIds)}, photoUrl=${String(item.content?.photoUrl || "").trim()}`);
+
+            return {
+                item,
+                taggedUserIds: normalizeTaggedUserIds(item.taggedUserIds),
+                photoUrl: String(item.content?.photoUrl || "").trim(),
+                createdAt: dateString 
+            };
+        })
+        .filter(({ item, taggedUserIds, photoUrl }) => {
+            const isPhoto = item.type === "photo";
+            const hasTaggedUsers = taggedUserIds.length > 0;
+            const hasPhotoUrl = Boolean(photoUrl);
+            const shouldInclude = isPhoto && hasTaggedUsers && hasPhotoUrl;
+
+            if (!shouldInclude) {
+                console.log(`[TODAY_MEMORY] Filtering out item ${item.id}: type=${item.type}, taggedUsers=${taggedUserIds.length}, hasUrl=${hasPhotoUrl}`);
+            }
+
+            return shouldInclude;
+        });
+
+    if (taggedPhotoItems.length === 0) {
+        return [];
+    }
+
+    const now = new Date();
+
+    const onThisDayItems = taggedPhotoItems
+        .filter(({ item }) => isOnThisDayFromPreviousYears(item.createdAt, now))
+        .sort((left, right) => right.item.createdAt - left.item.createdAt);
+
+    const candidateItems = (onThisDayItems.length > 0 ? onThisDayItems : taggedPhotoItems)
+        .sort((left, right) => {
+            const leftTime = left.item.createdAt instanceof Date ? left.item.createdAt.getTime() : 0;
+            const rightTime = right.item.createdAt instanceof Date ? right.item.createdAt.getTime() : 0;
+            return rightTime - leftTime;
+        })
+        .slice(0, Math.max(1, Number(limit) || TODAY_MEMORY_FALLBACK_LIMIT));
+
+    console.log(`[TODAY_MEMORY] Using ${onThisDayItems.length > 0 ? '"on this day" mode' : 'fallback latest photos mode'}`);
+
+    const usernameMap = await buildTaggedUsernameMap(
+        candidateItems.flatMap(({ taggedUserIds }) => taggedUserIds)
+    );
+
+    const result = candidateItems
+        .map(({ taggedUserIds, photoUrl, createdAt }) => ({
+            taggedUsernames: taggedUserIds
+                .map((userId) => usernameMap.get(userId))
+                .filter(Boolean),
+            photoUrl,
+            createdAt,
+        }))
+        .filter((memoryItem) => memoryItem.taggedUsernames.length > 0);
+
+    console.log(`[TODAY_MEMORY] Final result: ${result.length} memory items with valid usernames`);
+    return result;
+}
+
 export async function getItemById(groupId, pageId, itemId) {
     const doc = await groupsCollection
         .doc(groupId)
@@ -641,7 +869,7 @@ export async function getItemById(groupId, pageId, itemId) {
         .get();
     if (!doc.exists) {
         return null;
-    } 
+    }
     return ScrapbookItemModel.fromSnapshot(doc)
 }
 
@@ -649,18 +877,18 @@ export async function createScrapbookItem(groupId, pageId, payload) {
     try {
         // Upload content to Cloudinary first if file exists
         let parsedData = {};
-        
+
         if (payload.payload && typeof payload.payload === 'string') {
-            parsedData = JSON.parse(payload.payload); 
+            parsedData = JSON.parse(payload.payload);
         } else {
-            parsedData = payload; 
+            parsedData = payload;
         }
 
         let processedPayload = {
-            ...parsedData, 
+            ...parsedData,
             content: {
-                ...parsedData.content, 
-                ...(payload.content || {}) 
+                ...parsedData.content,
+                ...(payload.content || {})
             }
         };
 
@@ -681,6 +909,27 @@ export async function createScrapbookItem(groupId, pageId, payload) {
             };
         }
 
+        // Handle face embeddings for automatic tagging
+        let taggedUserIds = [];
+        if (payload.faceEmbeddings) {
+            console.log("Processing face embeddings for automatic tagging...");
+            try {
+                // Parse faceEmbeddings from form-data (stringified JSON)
+                let embeddings = payload.faceEmbeddings;
+                if (typeof embeddings === 'string') {
+                    embeddings = JSON.parse(embeddings);
+                }
+
+                // Validate it's an array
+                if (Array.isArray(embeddings)) {
+                    taggedUserIds = await matchFaceEmbeddings(groupId, embeddings);
+                }
+            } catch (error) {
+                console.warn("Warning: Failed to process face embeddings:", error.message);
+                // Continue without face tagging
+            }
+        }
+
         const docRef = groupsCollection
             .doc(groupId)
             .collection("scrapbookPages")
@@ -690,6 +939,7 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 
         const item = new ScrapbookItemModel({
             ...processedPayload,
+            taggedUserIds: taggedUserIds,
             createdAt: FieldValue.serverTimestamp(),
         });
 
@@ -790,7 +1040,7 @@ export async function addReaction(groupId, pageId, itemId, payload) {
         .collection("reactions")
         .doc(reaction.id)
         .set(reaction.toFirestore());
-    
+
     return res;
 }
 
