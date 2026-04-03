@@ -14,6 +14,7 @@ import {
     listPendingInvitationsByUser,
     listScrapbookItems,
     listScrapbookPages,
+    listTodayMemoryItems,
     markMessageSeen,
     removeMemberAndWidget,
     respondToGroupInvitation,
@@ -367,6 +368,28 @@ export async function getPageItems(req, res, next) {
         res.json(items);
     } catch (error) {
         next(error);
+    }
+}
+
+export async function getTodayMemory(req, res, next) {
+    try {
+        const { groupId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can access memories" });
+        }
+
+        const memories = await listTodayMemoryItems(groupId);
+        return res.json(memories);
+    } catch (error) {
+        return next(error);
     }
 }
 

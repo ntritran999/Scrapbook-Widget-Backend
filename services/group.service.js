@@ -15,6 +15,7 @@ import { publishGroupMessageEvent } from "./messageRealtime.service.js";
 
 const groupsCollection = db.collection("groups");
 const usersCollection = db.collection("users");
+const TODAY_MEMORY_FALLBACK_LIMIT = 10;
 
 // Utility: Calculate Cosine Similarity between two vectors
 function cosineSimilarity(vecA, vecB) {
@@ -708,6 +709,156 @@ export async function listScrapbookItems(groupId, pageId) {
     return snapshot.docs.map(ScrapbookItemModel.fromSnapshot);
 }
 
+function normalizeTaggedUserIds(taggedUserIds = []) {
+    if (!Array.isArray(taggedUserIds)) {
+        return [];
+    }
+
+    return Array.from(
+        new Set(
+            taggedUserIds
+                .map((userId) => String(userId || "").trim())
+                .filter(Boolean)
+        )
+    );
+}
+
+function isOnThisDayFromPreviousYears(date, referenceDate = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return false;
+    }
+
+    const isMatch = (
+        date.getUTCMonth() === referenceDate.getUTCMonth() &&
+        date.getUTCDate() === referenceDate.getUTCDate() &&
+        date.getUTCFullYear() < referenceDate.getUTCFullYear()
+    );
+
+    if (isMatch) {
+        console.log(`[TODAY_MEMORY] isOnThisDay: MATCH - ${date.toISOString()} matches ${referenceDate.toISOString()} (month/day only)`);
+    }
+
+    return isMatch;
+}
+
+async function buildTaggedUsernameMap(userIds = []) {
+    const uniqueUserIds = Array.from(new Set((userIds || []).filter(Boolean)));
+
+    if (uniqueUserIds.length === 0) {
+        return new Map();
+    }
+
+    const userDocs = await Promise.all(
+        uniqueUserIds.map((userId) => usersCollection.doc(userId).get())
+    );
+
+    const usernameMap = new Map();
+    for (const userDoc of userDocs) {
+        if (!userDoc.exists) {
+            continue;
+        }
+
+        const username = String(userDoc.data()?.username || "").trim();
+        if (!username) {
+            continue;
+        }
+
+        usernameMap.set(userDoc.id, username);
+    }
+
+    return usernameMap;
+}
+
+export async function listTodayMemoryItems(groupId, limit = TODAY_MEMORY_FALLBACK_LIMIT) {
+    const pages = await listScrapbookPages(groupId);
+    if (pages.length === 0) {
+        console.log(`[TODAY_MEMORY] No pages found, returning empty`);
+        return [];
+    }
+
+    const pageItems = await Promise.all(
+        pages.map((page) => listScrapbookItems(groupId, page.id))
+    );
+    const totalItems = pageItems.flat().length;
+
+    const taggedPhotoItems = pageItems
+        .flat()
+        .map((item) => {
+            let dateString = null;
+
+            if (item.createdAt) {
+                const dateObj = typeof item.createdAt.toDate === 'function'
+                    ? item.createdAt.toDate()
+                    : new Date(item.createdAt);
+
+                if (!isNaN(dateObj.getTime())) {
+                    dateString = dateObj.toLocaleDateString('en-US', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric'
+                    });
+                }
+            }
+            console.log(`[TODAY_MEMORY] Processing item ${item.id}: type=${item.type}, createdAt=${dateString}, taggedUserIds=${JSON.stringify(item.taggedUserIds)}, photoUrl=${String(item.content?.photoUrl || "").trim()}`);
+
+            return {
+                item,
+                taggedUserIds: normalizeTaggedUserIds(item.taggedUserIds),
+                photoUrl: String(item.content?.photoUrl || "").trim(),
+                createdAt: dateString 
+            };
+        })
+        .filter(({ item, taggedUserIds, photoUrl }) => {
+            const isPhoto = item.type === "photo";
+            const hasTaggedUsers = taggedUserIds.length > 0;
+            const hasPhotoUrl = Boolean(photoUrl);
+            const shouldInclude = isPhoto && hasTaggedUsers && hasPhotoUrl;
+
+            if (!shouldInclude) {
+                console.log(`[TODAY_MEMORY] Filtering out item ${item.id}: type=${item.type}, taggedUsers=${taggedUserIds.length}, hasUrl=${hasPhotoUrl}`);
+            }
+
+            return shouldInclude;
+        });
+
+    if (taggedPhotoItems.length === 0) {
+        return [];
+    }
+
+    const now = new Date();
+
+    const onThisDayItems = taggedPhotoItems
+        .filter(({ item }) => isOnThisDayFromPreviousYears(item.createdAt, now))
+        .sort((left, right) => right.item.createdAt - left.item.createdAt);
+
+    const candidateItems = (onThisDayItems.length > 0 ? onThisDayItems : taggedPhotoItems)
+        .sort((left, right) => {
+            const leftTime = left.item.createdAt instanceof Date ? left.item.createdAt.getTime() : 0;
+            const rightTime = right.item.createdAt instanceof Date ? right.item.createdAt.getTime() : 0;
+            return rightTime - leftTime;
+        })
+        .slice(0, Math.max(1, Number(limit) || TODAY_MEMORY_FALLBACK_LIMIT));
+
+    console.log(`[TODAY_MEMORY] Using ${onThisDayItems.length > 0 ? '"on this day" mode' : 'fallback latest photos mode'}`);
+
+    const usernameMap = await buildTaggedUsernameMap(
+        candidateItems.flatMap(({ taggedUserIds }) => taggedUserIds)
+    );
+
+    const result = candidateItems
+        .map(({ taggedUserIds, photoUrl, createdAt }) => ({
+            taggedUsernames: taggedUserIds
+                .map((userId) => usernameMap.get(userId))
+                .filter(Boolean),
+            photoUrl,
+            createdAt,
+        }))
+        .filter((memoryItem) => memoryItem.taggedUsernames.length > 0);
+
+    console.log(`[TODAY_MEMORY] Final result: ${result.length} memory items with valid usernames`);
+    return result;
+}
+
 export async function getItemById(groupId, pageId, itemId) {
     const doc = await groupsCollection
         .doc(groupId)
@@ -718,7 +869,7 @@ export async function getItemById(groupId, pageId, itemId) {
         .get();
     if (!doc.exists) {
         return null;
-    } 
+    }
     return ScrapbookItemModel.fromSnapshot(doc)
 }
 
@@ -726,18 +877,18 @@ export async function createScrapbookItem(groupId, pageId, payload) {
     try {
         // Upload content to Cloudinary first if file exists
         let parsedData = {};
-        
+
         if (payload.payload && typeof payload.payload === 'string') {
-            parsedData = JSON.parse(payload.payload); 
+            parsedData = JSON.parse(payload.payload);
         } else {
-            parsedData = payload; 
+            parsedData = payload;
         }
 
         let processedPayload = {
-            ...parsedData, 
+            ...parsedData,
             content: {
-                ...parsedData.content, 
-                ...(payload.content || {}) 
+                ...parsedData.content,
+                ...(payload.content || {})
             }
         };
 
@@ -889,7 +1040,7 @@ export async function addReaction(groupId, pageId, itemId, payload) {
         .collection("reactions")
         .doc(reaction.id)
         .set(reaction.toFirestore());
-    
+
     return res;
 }
 

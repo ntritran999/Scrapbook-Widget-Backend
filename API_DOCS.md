@@ -1173,6 +1173,68 @@ Behavior:
 
 - Invitation status -> `declined`
 
+### GET `/groups/:groupId/today-memory`
+
+Return memory photos for story-like playback inside Group Chat.
+
+Authorization:
+
+- Requires Firebase ID token in `Authorization: Bearer <token>`.
+- Current user (`req.authUser.uid`) must be a member of `groups/{groupId}/members/{uid}`.
+
+Path params:
+
+- `groupId`: group document id
+
+Behavior:
+
+- Verify group exists. Returns `404` if not found.
+- Verify authenticated user is a member of the group. Returns `403` if not a member.
+- Scan scrapbook items that belong to this group only.
+- Only include items where `type === "photo"` and `taggedUserIds` is a non-empty array.
+- Prioritize photos created on the same month/day in previous years ("on this day").
+- If no "on this day" memory exists, fallback to latest tagged photos.
+- Join `taggedUserIds` with `users/{uid}.username`.
+- Deleted or missing users are skipped.
+- Response is returned as a raw JSON array, not wrapped in an object.
+
+Response `200`:
+
+```json
+[
+  {
+    "taggedUsernames": ["john_doe", "alice_wonder"],
+    "photoUrl": "https://res.cloudinary.com/your-cloud-name/image/upload/v1234/..."
+  },
+  {
+    "taggedUsernames": ["john_doe", "bob_builder"],
+    "photoUrl": "https://res.cloudinary.com/your-cloud-name/image/upload/v5678/..."
+  }
+]
+```
+
+Empty response `200`:
+
+```json
+[]
+```
+
+Response `403`:
+
+```json
+{
+  "message": "Only group members can access memories"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Group not found"
+}
+```
+
 ### GET `/groups/:groupId/scrapbook-pages`
 
 List scrapbook pages for group.
