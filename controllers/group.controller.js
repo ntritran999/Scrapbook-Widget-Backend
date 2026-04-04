@@ -5,9 +5,11 @@ import {
     createGroupWithMembers,
     createScrapbookPageAndUpdateWidgets,
     createScrapbookItem,
+    refreshInviteCode,
     getGroupById,
     getItemById,
     getMemberById,
+    joinGroupByInviteCode,
     listGroups,
     listMembers,
     listMessages,
@@ -310,6 +312,47 @@ export async function postDeclineGroupInvitation(req, res, next) {
         }
 
         return res.json(invitation);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function getGroupInviteLink(req, res, next) {
+    try {
+        const { groupId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can get invite link" });
+        }
+
+        const inviteCode = await refreshInviteCode(groupId);
+        return res.json({
+            inviteCode,
+            inviteLink: `https://scrapbook-widget-bait.vercel.app/?code=${inviteCode}`,
+        });
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function postJoinGroupByLink(req, res, next) {
+    try {
+        const requesterId = req.authUser?.uid;
+        const inviteCode = String(req.body?.inviteCode || "").trim();
+
+        if (!inviteCode) {
+            return res.status(400).json({ message: "inviteCode is required" });
+        }
+
+        const joinedGroup = await joinGroupByInviteCode(inviteCode, requesterId);
+        return res.json(joinedGroup);
     } catch (error) {
         return next(error);
     }

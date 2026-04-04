@@ -97,6 +97,9 @@ const INVITATION_STATUS_PENDING = "pending";
 const INVITATION_STATUS_ACCEPTED = "accepted";
 const INVITATION_STATUS_DECLINED = "declined";
 const INVITATION_SOURCE_DIRECT = "direct";
+const INVITE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const INVITE_CODE_LENGTH = 6;
+const INVITE_CODE_MAX_ATTEMPTS = 10;
 
 function pickUserName(userData = {}, fallbackId = "") {
     return (
@@ -326,9 +329,49 @@ export async function uploadAvatarForGroup(groupId, userId, fileBuffer) {
     };
 }
 
+export async function refreshInviteCode(groupId) {
+    const groupRef = groupsCollection.doc(groupId);
+    let resolvedInviteCode = "";
+
+    await db.runTransaction(async (transaction) => {
+        const groupDoc = await transaction.get(groupRef);
+
+        if (!groupDoc.exists) {
+            const error = new Error("Group not found");
+            error.statusCode = 404;
+            throw error;
+        }
+
+        for (let attempt = 0; attempt < INVITE_CODE_MAX_ATTEMPTS; attempt += 1) {
+            const candidateCode = generateInviteCode();
+            const duplicateSnapshot = await transaction.get(
+                groupsCollection.where("inviteCode", "==", candidateCode).limit(1)
+            );
+
+            if (!duplicateSnapshot.empty) {
+                continue;
+            }
+
+            transaction.set(groupRef, { inviteCode: candidateCode }, { merge: true });
+            resolvedInviteCode = candidateCode;
+            return;
+        }
+
+        const error = new Error("Failed to generate invite code");
+        error.statusCode = 500;
+        throw error;
+    });
+
+    return resolvedInviteCode;
+}
+
 export async function createGroup(payload) {
     const docRef = groupsCollection.doc();
-    const group = new GroupModel({ ...payload, createdAt: FieldValue.serverTimestamp() });
+    const group = new GroupModel({
+        ...payload,
+        inviteCode: String(payload.inviteCode || ""),
+        createdAt: FieldValue.serverTimestamp(),
+    });
     await docRef.set(group.toFirestore());
     const created = await docRef.get();
     return GroupModel.fromSnapshot(created);
@@ -347,6 +390,7 @@ export async function createGroupWithMembers(payload) {
     const group = new GroupModel({
         groupName,
         avatarUrl,
+        inviteCode: "",
         createdBy,
         createdAt: FieldValue.serverTimestamp(),
     });
@@ -589,6 +633,83 @@ export async function respondToGroupInvitation(groupId, userId, action) {
     await batch.commit();
     const updatedInvite = await inviteRef.get();
     return { id: updatedInvite.id, ...updatedInvite.data() };
+}
+
+export async function joinGroupByInviteCode(inviteCode, userId) {
+    const normalizedInviteCode = String(inviteCode || "").trim().toUpperCase();
+
+    if (!normalizedInviteCode || normalizedInviteCode.length !== INVITE_CODE_LENGTH) {
+        const error = new Error("inviteCode is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const groupSnapshot = await groupsCollection
+        .where("inviteCode", "==", normalizedInviteCode)
+        .limit(1)
+        .get();
+
+    if (groupSnapshot.empty) {
+        const error = new Error("Invite link is invalid");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const groupDoc = groupSnapshot.docs[0];
+    const groupId = groupDoc.id;
+    const groupRef = groupsCollection.doc(groupId);
+    const memberRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+    const widgetRef = usersCollection.doc(userId).collection("widgets").doc(groupId);
+
+    await db.runTransaction(async (transaction) => {
+        const currentGroupDoc = await transaction.get(groupRef);
+        if (!currentGroupDoc.exists) {
+            const error = new Error("Group not found");
+            error.statusCode = 404;
+            throw error;
+        }
+
+        const currentInviteCode = String(currentGroupDoc.data()?.inviteCode || "").trim().toUpperCase();
+        if (currentInviteCode !== normalizedInviteCode) {
+            const error = new Error("Invite link is invalid");
+            error.statusCode = 404;
+            throw error;
+        }
+
+        const memberDoc = await transaction.get(memberRef);
+
+        if (!memberDoc.exists) {
+            const member = new MemberModel({
+                id: userId,
+                role: "member",
+                joinedAt: FieldValue.serverTimestamp(),
+            });
+            transaction.set(memberRef, member.toFirestore(), { merge: true });
+        }
+
+        transaction.set(
+            widgetRef,
+            {
+                groupId,
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+
+        transaction.set(
+            groupRef,
+            {
+                inviteCode: "",
+            },
+            { merge: true }
+        );
+    });
+
+    const group = GroupModel.fromSnapshot(groupDoc);
+    return {
+        groupId: group.id,
+        groupName: group.groupName,
+    };
 }
 
 export async function removeMemberAndWidget(groupId, userId) {
@@ -1056,4 +1177,15 @@ export async function removeReaction(groupId, pageId, itemId, userId) {
         .delete();
 
     return res;
+}
+
+function generateInviteCode(length = INVITE_CODE_LENGTH) {
+    let result = "";
+
+    for (let index = 0; index < length; index += 1) {
+        const randomIndex = Math.floor(Math.random() * INVITE_CODE_ALPHABET.length);
+        result += INVITE_CODE_ALPHABET[randomIndex];
+    }
+
+    return result;
 }

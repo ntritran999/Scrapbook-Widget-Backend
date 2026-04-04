@@ -33,6 +33,7 @@ Fields:
 
 - groupName (string)
 - avatarUrl (string)
+- inviteCode (string): empty by default, generated on demand for invite-link, cleared again after one successful join
 - createdBy (string)
 - createdAt (timestamp)
 
@@ -63,6 +64,8 @@ Behavior Notes:
   - backgroundColor = `#ffffff`
   - backgroundImage = ``
 - Owner widget `users/{ownerId}/widgets/{groupId}` is initialized with this `pageId`.
+- `groups/{groupId}.inviteCode` is initialized as empty string (`""`).
+- Invite code is single-use: backend generates a fresh code when requesting an invite link, and clears it back to empty string after a successful join-by-link.
 - If owner leaves group and there is at least one remaining member, `groups/{groupId}.createdBy`
   is transferred to the first remaining member.
 - If the last member leaves, `groups/{groupId}` is deleted.
