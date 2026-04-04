@@ -136,10 +136,16 @@ Entity-specific 404 examples:
   "id": "string",
   "groupName": "string",
   "avatarUrl": "string",
+  "inviteCode": "string",
   "createdBy": "userId",
   "createdAt": "date | null"
 }
 ```
+
+Note:
+
+- `inviteCode` is empty (`""`) by default when a group is first created.
+- Invite codes are single-use. A new one is generated when client requests an invite link, and it is cleared again after a successful join-by-link.
 
 ### Member (`groups/{groupId}/members/{userId}`)
 
@@ -850,6 +856,7 @@ Response `200`:
     "id": "groupId",
     "groupName": "My Scrapbook Group",
     "avatarUrl": "https://example.com/group-avatar.jpg",
+    "inviteCode": "X7A9K2",
     "createdBy": "ownerUid",
     "createdAt": null,
     "latestMessage": {
@@ -877,6 +884,7 @@ Response `200`:
     "id": "groupId2",
     "groupName": "Empty Group",
     "avatarUrl": "",
+    "inviteCode": "",
     "createdBy": "ownerUid",
     "createdAt": null,
     "latestMessage": null
@@ -919,6 +927,7 @@ Behavior:
 - `createdBy` is inferred from Firebase token (`req.authUser.uid`).
 - Only owner is added immediately to `members` with role `admin`.
 - Users in `memberIds` are created as `pending` invitations, not immediate members.
+- `inviteCode` is initialized as empty string (`""`).
 - System automatically creates one default scrapbook page for the new group:
   - `title`: `Page 1`
   - `templateId`: `null`
@@ -934,6 +943,7 @@ Response `201`:
   "id": "groupId",
   "groupName": "My Scrapbook Group",
   "avatarUrl": "https://example.com/group-avatar.jpg",
+  "inviteCode": "",
   "createdBy": "ownerUid",
   "createdAt": "2026-04-01T10:00:00.000Z",
   "latestPage": {
@@ -1172,6 +1182,101 @@ Decline my invitation to a group.
 Behavior:
 
 - Invitation status -> `declined`
+
+### GET `/groups/:groupId/invite-link`
+
+Get or generate the invite deep link for a group.
+
+Permissions:
+
+- Any existing group member can call this endpoint.
+
+Path params:
+
+- `groupId`: group document id
+
+Behavior:
+
+- Verify group exists. Returns `404` if not found.
+- Verify authenticated user is a member of the group. Returns `403` if not a member.
+- Backend always generates a fresh unique 6-character uppercase invite code and overwrites any previous unused invite code for this group.
+- Returns both `inviteCode` and deep link in format `scrapbook://invite?code=<inviteCode>`.
+- The invite code is intended for one successful join only.
+
+Response `200`:
+
+```json
+{
+  "inviteCode": "X7A9K2",
+  "inviteLink": "scrapbook://invite?code=X7A9K2"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "Only group members can get invite link"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Group not found"
+}
+```
+
+### POST `/groups/join-by-link`
+
+Join a group by invite code.
+
+Permissions:
+
+- Requires Firebase ID token.
+
+Request body:
+
+```json
+{
+  "inviteCode": "X7A9K2"
+}
+```
+
+Behavior:
+
+- Query `groups` by `inviteCode`.
+- If no group is found, returns `404`.
+- If current user is not yet a member, create `groups/{groupId}/members/{uid}` with role `member`.
+- Create/update `users/{uid}/widgets/{groupId}` similar to invitation accept flow.
+- Clear `groups/{groupId}.inviteCode` back to empty string (`""`) in the same transaction after the join succeeds so the code cannot be reused.
+- If current user is already a member, endpoint still returns target group info and the used invite code is invalidated.
+
+Response `200`:
+
+```json
+{
+  "groupId": "groupId",
+  "groupName": "My Scrapbook Group"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "inviteCode is required"
+}
+```
+
+Response `404`:
+
+```json
+{
+  "message": "Invite link is invalid"
+}
+```
 
 ### GET `/groups/:groupId/today-memory`
 

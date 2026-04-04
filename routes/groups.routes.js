@@ -4,6 +4,7 @@ import { requireAuth } from "../middlewares/auth.middleware.js";
 import {
     deleteGroupMember,
     getGroup,
+    getGroupInviteLink,
     getMyGroupInvitations,
     getGroupMembers,
     getGroupMessages,
@@ -22,6 +23,7 @@ import {
     postDeclineGroupInvitation,
     postGroup,
     postGroupInvitation,
+    postJoinGroupByLink,
     postGroupMessage,
     postPage,
     postPageItem,
@@ -36,8 +38,10 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", getGroups);
+router.post("/join-by-link", postJoinGroupByLink);
 router.get("/invitations/me", getMyGroupInvitations);
 router.get("/:groupId", getGroup);
+router.get("/:groupId/invite-link", getGroupInviteLink);
 router.post("/", postGroup);
 router.patch("/:groupId/name", patchGroupName);
 router.post("/:groupId/avatar", uploadImage, handleUploadError, postGroupAvatar);

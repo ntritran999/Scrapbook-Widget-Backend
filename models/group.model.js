@@ -24,12 +24,14 @@ export class GroupModel {
         id = null,
         groupName = "",
         avatarUrl = "",
+        inviteCode = "",
         createdBy = "",
         createdAt = null,
     } = {}) {
         this.id = id;
         this.groupName = groupName;
         this.avatarUrl = avatarUrl;
+        this.inviteCode = String(inviteCode || "");
         this.createdBy = createdBy;
         this.createdAt = normalizeTimestamp(createdAt);
     }
@@ -42,6 +44,7 @@ export class GroupModel {
         return {
             groupName: this.groupName,
             avatarUrl: this.avatarUrl,
+            inviteCode: this.inviteCode,
             createdBy: this.createdBy,
             createdAt: this.createdAt,
         };
