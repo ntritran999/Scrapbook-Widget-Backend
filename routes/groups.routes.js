@@ -30,6 +30,7 @@ import {
     streamGroupMessages,
     putGroupMember,
     putSeenBy,
+    deletePage,
 } from "../controllers/group.controller.js";
 import { uploadImage, handleUploadError } from "../middleware/upload.js";
 
@@ -57,6 +58,7 @@ router.post("/:groupId/invitations/decline", postDeclineGroupInvitation);
 
 router.get("/:groupId/scrapbook-pages", getPages);
 router.post("/:groupId/scrapbook-pages", postPage);
+router.delete("/:groupId/scrapbook-pages/:pageId", deletePage);
 router.get("/:groupId/scrapbook-pages/:pageId/items", getPageItems);
 router.post("/:groupId/scrapbook-pages/:pageId/items", uploadImage, handleUploadError, postPageItem);
 router.get("/:groupId/scrapbook-pages/:pageId/:itemId", getItem);

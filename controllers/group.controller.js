@@ -24,7 +24,8 @@ import {
     updateGroup,
     listItemReactions,
     removeReaction,
-    addReaction
+    addReaction,
+    removePage
 } from "../services/group.service.js";
 import {
     sendSseEvent,
@@ -400,6 +401,19 @@ export async function postPage(req, res, next) {
             createdBy: req.authUser.uid,
         });
         res.status(201).json(page);
+    } catch (error) {
+        next(error);
+    }
+}
+
+export async function deletePage(req, res, next) {
+    try {
+        const group = await getGroupById(req.params.groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+        const result = await removePage(group.id, req.params.pageId);
+        res.sendStatus(204);
     } catch (error) {
         next(error);
     }
