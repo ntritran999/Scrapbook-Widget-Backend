@@ -820,6 +820,11 @@ export async function createScrapbookPageAndUpdateWidgets(groupId, payload) {
     return ScrapbookPageModel.fromSnapshot(created);
 }
 
+export async function removePage(groupId, pageId) {
+    const result = await groupsCollection.doc(groupId).collection("scrapbookPages").doc(pageId).delete();
+    return result;
+}
+
 export async function listScrapbookItems(groupId, pageId) {
     const snapshot = await groupsCollection
         .doc(groupId)
