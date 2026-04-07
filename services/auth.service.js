@@ -1,10 +1,18 @@
+import { createHash, randomInt } from "node:crypto";
+
 import { getAuth } from "firebase-admin/auth";
 import { FieldPath, FieldValue } from "firebase-admin/firestore";
 
 import { db, firebaseApp } from "../firebaseConfig.js";
+import { createGroupWithMembers } from "./group.service.js";
+import {
+    sendNewGoogleAccountWelcomeEmail,
+    sendRegisterOtpEmail,
+} from "./mail.service.js";
 
 const usersCollection = db.collection("users");
 const groupsCollection = db.collection("groups");
+const registerOtpCollection = db.collection("auth_register_otps");
 
 const DELETED_USER_UID = "deleted-user";
 const DELETED_USER_NAME = "Deleted User";
@@ -13,6 +21,9 @@ const DELETED_USER_AVATAR_URL = "https://placehold.co/128x128?text=Deleted";
 const DELETED_CONTENT_IMAGE_URL = "https://placehold.co/600x400?text=Deleted+Content";
 const DELETED_TEXT_CONTENT = "[Content from deleted account]";
 const DELETE_BATCH_LIMIT = 450;
+const REGISTER_OTP_TTL_SECONDS = 10 * 60;
+const REGISTER_OTP_RESEND_COOLDOWN_SECONDS = 60;
+const REGISTER_OTP_MAX_ATTEMPTS = 5;
 
 function makeError(message, statusCode) {
     const error = new Error(message);
@@ -42,6 +53,52 @@ function normalizeAuthPayload(payload = {}) {
     };
 }
 
+function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function getOtpCode(payload = {}) {
+    const raw = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    return String(raw?.otpCode ?? raw?.otp ?? "").trim();
+}
+
+function getOtpDocId(email) {
+    return createHash("sha256").update(`register:${email}`).digest("hex");
+}
+
+function hashOtp(email, otpCode) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedCode = String(otpCode || "").trim();
+    const secret = String(process.env.OTP_HASH_SECRET || "otp-hash-secret");
+    return createHash("sha256")
+        .update(`${normalizedEmail}:${normalizedCode}:${secret}`)
+        .digest("hex");
+}
+
+function generateOtpCode() {
+    return String(randomInt(100000, 1000000));
+}
+
+function maskEmail(email) {
+    const normalizedEmail = normalizeEmail(email);
+    const [localPart, domain = ""] = normalizedEmail.split("@");
+    if (!localPart || !domain) {
+        return normalizedEmail;
+    }
+
+    if (localPart.length <= 2) {
+        return `${localPart[0] || "*"}***@${domain}`;
+    }
+
+    return `${localPart[0]}${"*".repeat(Math.max(1, localPart.length - 2))}${
+        localPart[localPart.length - 1]
+    }@${domain}`;
+}
+
 function mapFirebaseLoginError(firebaseMessage = "") {
     if (
         firebaseMessage === "INVALID_PASSWORD" ||
@@ -61,6 +118,34 @@ function mapFirebaseLoginError(firebaseMessage = "") {
 
 function normalizeUid(uid) {
     return String(uid || "").trim();
+}
+
+function extractIdToken(payload = {}) {
+    const raw = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const tokenCandidate = raw?.idToken ?? raw?.firebaseIdToken ?? "";
+    return String(tokenCandidate).trim();
+}
+
+function deriveUsernameFromToken(decodedToken = {}) {
+    const emailLocalPart = String(decodedToken?.email || "").split("@")[0] || "";
+    const displayName = String(decodedToken?.name || "");
+    const source = (emailLocalPart || displayName || "user").toLowerCase();
+    const normalized = source.replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").slice(0, 20);
+
+    if (normalized.length >= 3) {
+        return normalized;
+    }
+
+    const uidPart = normalizeUid(decodedToken?.uid).slice(0, 6) || "guest";
+    return `user_${uidPart}`;
+}
+
+function buildDefaultScrapbookName(decodedToken = {}) {
+    const displayName = String(decodedToken?.name || "").trim();
+    if (!displayName) {
+        return "My Scrapbook";
+    }
+    return `${displayName}'s Scrapbook`;
 }
 
 function isAccountBlocked(userData = {}) {
@@ -146,9 +231,131 @@ function createBatchWriter() {
     return { set, del, commitAll };
 }
 
+async function ensureRegisterOtpValid(email, otpCode) {
+    const otpDocId = getOtpDocId(email);
+    const otpRef = registerOtpCollection.doc(otpDocId);
+    const otpSnapshot = await otpRef.get();
+
+    if (!otpSnapshot.exists) {
+        throw makeError("OTP not requested or already expired", 400);
+    }
+
+    const otpData = otpSnapshot.data() || {};
+    const now = Date.now();
+    const expiresAtMs = otpData?.expiresAt?.toDate ? otpData.expiresAt.toDate().getTime() : 0;
+    const attempts = Number(otpData?.attempts || 0);
+
+    if (otpData.used === true) {
+        throw makeError("OTP already used", 400);
+    }
+
+    if (!expiresAtMs || expiresAtMs <= now) {
+        throw makeError("OTP expired, please request a new OTP", 400);
+    }
+
+    if (attempts >= REGISTER_OTP_MAX_ATTEMPTS) {
+        throw makeError("Too many OTP attempts, please request a new OTP", 429);
+    }
+
+    const expectedHash = String(otpData.codeHash || "");
+    const incomingHash = hashOtp(email, otpCode);
+    if (!expectedHash || expectedHash !== incomingHash) {
+        await otpRef.set(
+            {
+                attempts: FieldValue.increment(1),
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+        throw makeError("Invalid OTP code", 400);
+    }
+
+    return { otpRef };
+}
+
+export async function requestRegisterOtp(payload) {
+    const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const email = normalizeEmail(
+        normalized?.email ?? normalized?.mail ?? normalized?.userEmail ?? normalized?.username ?? ""
+    );
+
+    if (!email) {
+        throw makeError("email is required", 400);
+    }
+
+    if (!isValidEmail(email)) {
+        throw makeError("email format is invalid", 400);
+    }
+
+    try {
+        await getAuth(firebaseApp).getUserByEmail(email);
+        throw makeError("email already exists", 409);
+    } catch (error) {
+        if (error?.statusCode) {
+            throw error;
+        }
+        if (error?.code !== "auth/user-not-found") {
+            throw error;
+        }
+    }
+
+    const otpDocId = getOtpDocId(email);
+    const otpRef = registerOtpCollection.doc(otpDocId);
+    const existingSnapshot = await otpRef.get();
+    const now = Date.now();
+
+    if (existingSnapshot.exists) {
+        const existingData = existingSnapshot.data() || {};
+        const resendAvailableAtMs = existingData?.resendAvailableAt?.toDate
+            ? existingData.resendAvailableAt.toDate().getTime()
+            : 0;
+
+        if (resendAvailableAtMs > now) {
+            const waitSeconds = Math.max(1, Math.ceil((resendAvailableAtMs - now) / 1000));
+            throw makeError(`Please wait ${waitSeconds}s before requesting another OTP`, 429);
+        }
+    }
+
+    const otpCode = generateOtpCode();
+    const expiresAt = new Date(now + REGISTER_OTP_TTL_SECONDS * 1000);
+    const resendAvailableAt = new Date(now + REGISTER_OTP_RESEND_COOLDOWN_SECONDS * 1000);
+
+    const sendResult = await sendRegisterOtpEmail({
+        toEmail: email,
+        otpCode,
+        expiresInMinutes: Math.floor(REGISTER_OTP_TTL_SECONDS / 60),
+    });
+
+    if (!sendResult?.sent) {
+        throw makeError("Unable to send OTP email, please configure SMTP and try again", 503);
+    }
+
+    await otpRef.set(
+        {
+            email,
+            codeHash: hashOtp(email, otpCode),
+            attempts: 0,
+            used: false,
+            expiresAt,
+            resendAvailableAt,
+            updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    return {
+        otpSent: true,
+        email: maskEmail(email),
+        expiresInSeconds: REGISTER_OTP_TTL_SECONDS,
+        resendAfterSeconds: REGISTER_OTP_RESEND_COOLDOWN_SECONDS,
+    };
+}
+
 export async function registerWithEmailAndPassword(payload) {
     const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    const { email, password } = normalizeAuthPayload(normalized);
+    const { email: rawEmail, password } = normalizeAuthPayload(normalized);
+    const email = normalizeEmail(rawEmail);
+    const otpCode = getOtpCode(normalized);
     const {
         displayName = "",
         username = "",
@@ -164,9 +371,19 @@ export async function registerWithEmailAndPassword(payload) {
         );
     }
 
+    if (!isValidEmail(email)) {
+        throw makeError("email format is invalid", 400);
+    }
+
+    if (!otpCode) {
+        throw makeError("otpCode is required", 400);
+    }
+
     if (String(password).length < 6) {
         throw makeError("password must be at least 6 characters", 400);
     }
+
+    const otpContext = await ensureRegisterOtpValid(email, otpCode);
 
     try {
         const auth = getAuth(firebaseApp);
@@ -184,6 +401,15 @@ export async function registerWithEmailAndPassword(payload) {
                 avatarUrl,
                 status,
                 createdAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+
+        await otpContext.otpRef.set(
+            {
+                used: true,
+                usedAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
             },
             { merge: true }
         );
@@ -258,7 +484,7 @@ export async function loginWithEmailAndPassword(payload) {
 }
 
 export async function verifyIdTokenAndCreateSession(payload) {
-    const { idToken } = payload;
+    const idToken = extractIdToken(payload);
 
     if (!idToken) {
         throw makeError("idToken is required", 400);
@@ -283,6 +509,111 @@ export async function verifyIdTokenAndCreateSession(payload) {
         email: decodedToken.email || null,
         name: decodedToken.name || null,
         picture: decodedToken.picture || null,
+        session: {
+            valid: true,
+            authTime: decodedToken.auth_time || null,
+            issuedAt: decodedToken.iat || null,
+            expiresAt: decodedToken.exp || null,
+        },
+    };
+}
+
+export async function loginWithGoogleIdToken(payload) {
+    const idToken = extractIdToken(payload);
+
+    if (!idToken) {
+        throw makeError("idToken is required", 400);
+    }
+
+    let decodedToken;
+    try {
+        decodedToken = await getAuth(firebaseApp).verifyIdToken(idToken);
+    } catch (error) {
+        if (
+            error?.code === "auth/id-token-expired" ||
+            error?.code === "auth/invalid-id-token" ||
+            error?.code === "auth/argument-error"
+        ) {
+            throw makeError("invalid or expired idToken", 401);
+        }
+        throw error;
+    }
+
+    const uid = normalizeUid(decodedToken.uid);
+    if (!uid) {
+        throw makeError("invalid or expired idToken", 401);
+    }
+
+    const userRef = usersCollection.doc(uid);
+    const userSnapshot = await userRef.get();
+
+    if (userSnapshot.exists && isAccountBlocked(userSnapshot.data())) {
+        await getAuth(firebaseApp).revokeRefreshTokens(uid);
+        throw makeError("account is inactive or deleted", 403);
+    }
+
+    const isNewUser = !userSnapshot.exists;
+    const upsertPayload = {
+        email: decodedToken.email || "",
+        nickname: decodedToken.name || "",
+        avatarUrl: decodedToken.picture || "",
+        status: "active",
+        provider: "google.com",
+        lastLoginAt: FieldValue.serverTimestamp(),
+    };
+
+    if (isNewUser) {
+        upsertPayload.username = deriveUsernameFromToken(decodedToken);
+        upsertPayload.createdAt = FieldValue.serverTimestamp();
+    }
+
+    await userRef.set(upsertPayload, { merge: true });
+
+    let onboarding = null;
+    let welcomeEmail = {
+        sent: false,
+        skipped: true,
+        reason: "not-a-new-user",
+    };
+
+    if (isNewUser) {
+        const starterGroup = await createGroupWithMembers({
+            groupName: buildDefaultScrapbookName(decodedToken),
+            avatarUrl: "",
+            createdBy: uid,
+            memberIds: [],
+        });
+
+        onboarding = {
+            defaultGroupId: starterGroup.id,
+            defaultGroupName: starterGroup.groupName,
+            defaultPageId: starterGroup.latestPage?.id || null,
+        };
+
+        try {
+            welcomeEmail = await sendNewGoogleAccountWelcomeEmail({
+                toEmail: decodedToken.email,
+                displayName: decodedToken.name,
+                defaultGroupName: starterGroup.groupName,
+            });
+        } catch (error) {
+            console.warn("Failed to send welcome email for new Google account:", error);
+            welcomeEmail = {
+                sent: false,
+                skipped: false,
+                reason: "send-failed",
+            };
+        }
+    }
+
+    return {
+        uid,
+        email: decodedToken.email || null,
+        name: decodedToken.name || null,
+        picture: decodedToken.picture || null,
+        isNewUser,
+        onboarding,
+        welcomeEmail,
         session: {
             valid: true,
             authTime: decodedToken.auth_time || null,

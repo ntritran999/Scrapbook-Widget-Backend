@@ -13,6 +13,14 @@ Environment variables required for auth:
 
 - Firebase Admin service account key file at `config/firebaseServiceAccountKey.json`
 - `FIREBASE_WEB_API_KEY` for `POST /auth/login` (Firebase Identity Toolkit sign-in)
+- Optional SMTP config for welcome email when new Google account is created:
+  - `SMTP_HOST`
+  - `SMTP_PORT` (default: `587`)
+  - `SMTP_SECURE` (`true` for SSL, usually `false` on port `587`)
+  - `SMTP_USER`
+  - `SMTP_PASS`
+  - `SMTP_FROM`
+- Optional: `OTP_HASH_SECRET` for hashing register OTP codes at rest.
 
 Environment variables required for media storage:
 
@@ -287,6 +295,68 @@ Note:
 
 ### Register Flow (Android -> Node.js -> Firebase Auth)
 
+Email/password register now requires OTP confirmation.
+
+1. Client calls `POST /auth/register/request-otp` with email.
+2. Backend sends OTP to email.
+3. Client calls `POST /auth/register` with email/password/profile + `otpCode`.
+4. Backend verifies OTP first, then creates Firebase Auth user and profile.
+
+### POST `/auth/register/request-otp`
+
+Send OTP code for email/password registration.
+
+Request body:
+
+```json
+{
+  "email": "john@example.com"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "otpSent": true,
+  "email": "j**n@example.com",
+  "expiresInSeconds": 600,
+  "resendAfterSeconds": 60
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "email is required"
+}
+```
+
+Response `409`:
+
+```json
+{
+  "message": "email already exists"
+}
+```
+
+Response `429`:
+
+```json
+{
+  "message": "Please wait 45s before requesting another OTP"
+}
+```
+
+Response `503`:
+
+```json
+{
+  "message": "Unable to send OTP email, please configure SMTP and try again"
+}
+```
+
 ### POST `/auth/register`
 
 Create a Firebase Auth user and initialize profile data in Firestore.
@@ -297,6 +367,7 @@ Request body:
 {
   "email": "john@example.com",
   "password": "secret123",
+  "otpCode": "123456",
   "displayName": "John Doe",
   "username": "john_doe",
   "nickname": "John",
@@ -322,6 +393,30 @@ Response `400`:
 }
 ```
 
+Response `400`:
+
+```json
+{
+  "message": "otpCode is required"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "Invalid OTP code"
+}
+```
+
+Response `429`:
+
+```json
+{
+  "message": "Too many OTP attempts, please request a new OTP"
+}
+```
+
 Response `409`:
 
 ```json
@@ -333,6 +428,19 @@ Response `409`:
 ### Login Flow (Android -> Firebase Auth -> ID Token -> Node.js)
 
 Android should sign in directly with Firebase Auth `signInWithEmailAndPassword(email, password)`, then send Firebase ID token to backend.
+
+### Google Login Flow (Android -> Firebase Auth -> ID Token -> Node.js)
+
+Android flow:
+
+1. User taps "Sign in with Google" in app.
+2. App signs in with Firebase Auth Google provider.
+3. App obtains Firebase ID token from current Firebase user.
+4. App sends token to backend `POST /auth/google`.
+5. Backend verifies token using Firebase Admin SDK and upserts profile in Firestore.
+6. If account does not exist yet, backend auto-registers user in DB and creates a starter scrapbook group with default `Page 1`.
+7. App receives onboarding info (`defaultGroupId`, `defaultPageId`) and can open it immediately.
+8. After that, app uses `Authorization: Bearer <firebase_id_token>` to access internal APIs.
 
 ### Login Flow (Android -> Node.js -> Firebase Auth)
 
@@ -431,6 +539,80 @@ Response `401`:
   "message": "invalid or expired idToken"
 }
 ```
+
+### POST `/auth/google`
+
+Verify Firebase ID token issued from Google sign-in and upsert user profile in Firestore.
+
+Request body:
+
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+Accepted key alias: `firebaseIdToken`.
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "email": "john@example.com",
+  "name": "John Doe",
+  "picture": "https://lh3.googleusercontent.com/...",
+  "isNewUser": true,
+  "onboarding": {
+    "defaultGroupId": "groupId",
+    "defaultGroupName": "John Doe's Scrapbook",
+    "defaultPageId": "pageId"
+  },
+  "welcomeEmail": {
+    "sent": true,
+    "skipped": false,
+    "reason": null
+  },
+  "session": {
+    "valid": true,
+    "authTime": 1711475082,
+    "issuedAt": 1711475090,
+    "expiresAt": 1711478690
+  }
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "idToken is required"
+}
+```
+
+Response `401`:
+
+```json
+{
+  "message": "invalid or expired idToken"
+}
+```
+
+Response `403`:
+
+```json
+{
+  "message": "account is inactive or deleted"
+}
+```
+
+Note:
+
+- `onboarding` is `null` when `isNewUser` is `false`.
+- `welcomeEmail` is best-effort and does not block login:
+  - `smtp-not-configured`: SMTP env is missing
+  - `missing-target-email`: token has no email
+  - `send-failed`: SMTP exists but send action failed
 
 ### POST `/auth/signout`
 
