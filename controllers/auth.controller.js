@@ -2,23 +2,10 @@ import {
     deleteAccountByUid,
     loginWithGoogleIdToken,
     loginWithEmailAndPassword,
-    requestRegisterOtp,
     registerWithEmailAndPassword,
     signOutByUid,
     verifyIdTokenAndCreateSession,
 } from "../services/auth.service.js";
-
-export async function postRegisterOtp(req, res, next) {
-    try {
-        const result = await requestRegisterOtp(req.body);
-        return res.status(200).json(result);
-    } catch (error) {
-        if (error?.statusCode) {
-            return res.status(error.statusCode).json({ message: error.message });
-        }
-        return next(error);
-    }
-}
 
 export async function postRegister(req, res, next) {
     try {

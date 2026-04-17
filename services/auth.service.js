@@ -1,18 +1,12 @@
-import { createHash, randomInt } from "node:crypto";
-
 import { getAuth } from "firebase-admin/auth";
 import { FieldPath, FieldValue } from "firebase-admin/firestore";
 
 import { db, firebaseApp } from "../firebaseConfig.js";
 import { createGroupWithMembers } from "./group.service.js";
-import {
-    sendNewGoogleAccountWelcomeEmail,
-    sendRegisterOtpEmail,
-} from "./mail.service.js";
+import { sendNewGoogleAccountWelcomeEmail } from "./mail.service.js";
 
 const usersCollection = db.collection("users");
 const groupsCollection = db.collection("groups");
-const registerOtpCollection = db.collection("auth_register_otps");
 
 const DELETED_USER_UID = "deleted-user";
 const DELETED_USER_NAME = "Deleted User";
@@ -21,9 +15,6 @@ const DELETED_USER_AVATAR_URL = "https://placehold.co/128x128?text=Deleted";
 const DELETED_CONTENT_IMAGE_URL = "https://placehold.co/600x400?text=Deleted+Content";
 const DELETED_TEXT_CONTENT = "[Content from deleted account]";
 const DELETE_BATCH_LIMIT = 450;
-const REGISTER_OTP_TTL_SECONDS = 10 * 60;
-const REGISTER_OTP_RESEND_COOLDOWN_SECONDS = 60;
-const REGISTER_OTP_MAX_ATTEMPTS = 5;
 
 function makeError(message, statusCode) {
     const error = new Error(message);
@@ -61,43 +52,6 @@ function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function getOtpCode(payload = {}) {
-    const raw = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    return String(raw?.otpCode ?? raw?.otp ?? "").trim();
-}
-
-function getOtpDocId(email) {
-    return createHash("sha256").update(`register:${email}`).digest("hex");
-}
-
-function hashOtp(email, otpCode) {
-    const normalizedEmail = normalizeEmail(email);
-    const normalizedCode = String(otpCode || "").trim();
-    const secret = String(process.env.OTP_HASH_SECRET || "otp-hash-secret");
-    return createHash("sha256")
-        .update(`${normalizedEmail}:${normalizedCode}:${secret}`)
-        .digest("hex");
-}
-
-function generateOtpCode() {
-    return String(randomInt(100000, 1000000));
-}
-
-function maskEmail(email) {
-    const normalizedEmail = normalizeEmail(email);
-    const [localPart, domain = ""] = normalizedEmail.split("@");
-    if (!localPart || !domain) {
-        return normalizedEmail;
-    }
-
-    if (localPart.length <= 2) {
-        return `${localPart[0] || "*"}***@${domain}`;
-    }
-
-    return `${localPart[0]}${"*".repeat(Math.max(1, localPart.length - 2))}${
-        localPart[localPart.length - 1]
-    }@${domain}`;
-}
 
 function mapFirebaseLoginError(firebaseMessage = "") {
     if (
@@ -231,131 +185,10 @@ function createBatchWriter() {
     return { set, del, commitAll };
 }
 
-async function ensureRegisterOtpValid(email, otpCode) {
-    const otpDocId = getOtpDocId(email);
-    const otpRef = registerOtpCollection.doc(otpDocId);
-    const otpSnapshot = await otpRef.get();
-
-    if (!otpSnapshot.exists) {
-        throw makeError("OTP not requested or already expired", 400);
-    }
-
-    const otpData = otpSnapshot.data() || {};
-    const now = Date.now();
-    const expiresAtMs = otpData?.expiresAt?.toDate ? otpData.expiresAt.toDate().getTime() : 0;
-    const attempts = Number(otpData?.attempts || 0);
-
-    if (otpData.used === true) {
-        throw makeError("OTP already used", 400);
-    }
-
-    if (!expiresAtMs || expiresAtMs <= now) {
-        throw makeError("OTP expired, please request a new OTP", 400);
-    }
-
-    if (attempts >= REGISTER_OTP_MAX_ATTEMPTS) {
-        throw makeError("Too many OTP attempts, please request a new OTP", 429);
-    }
-
-    const expectedHash = String(otpData.codeHash || "");
-    const incomingHash = hashOtp(email, otpCode);
-    if (!expectedHash || expectedHash !== incomingHash) {
-        await otpRef.set(
-            {
-                attempts: FieldValue.increment(1),
-                updatedAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
-        throw makeError("Invalid OTP code", 400);
-    }
-
-    return { otpRef };
-}
-
-export async function requestRegisterOtp(payload) {
-    const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    const email = normalizeEmail(
-        normalized?.email ?? normalized?.mail ?? normalized?.userEmail ?? normalized?.username ?? ""
-    );
-
-    if (!email) {
-        throw makeError("email is required", 400);
-    }
-
-    if (!isValidEmail(email)) {
-        throw makeError("email format is invalid", 400);
-    }
-
-    try {
-        await getAuth(firebaseApp).getUserByEmail(email);
-        throw makeError("email already exists", 409);
-    } catch (error) {
-        if (error?.statusCode) {
-            throw error;
-        }
-        if (error?.code !== "auth/user-not-found") {
-            throw error;
-        }
-    }
-
-    const otpDocId = getOtpDocId(email);
-    const otpRef = registerOtpCollection.doc(otpDocId);
-    const existingSnapshot = await otpRef.get();
-    const now = Date.now();
-
-    if (existingSnapshot.exists) {
-        const existingData = existingSnapshot.data() || {};
-        const resendAvailableAtMs = existingData?.resendAvailableAt?.toDate
-            ? existingData.resendAvailableAt.toDate().getTime()
-            : 0;
-
-        if (resendAvailableAtMs > now) {
-            const waitSeconds = Math.max(1, Math.ceil((resendAvailableAtMs - now) / 1000));
-            throw makeError(`Please wait ${waitSeconds}s before requesting another OTP`, 429);
-        }
-    }
-
-    const otpCode = generateOtpCode();
-    const expiresAt = new Date(now + REGISTER_OTP_TTL_SECONDS * 1000);
-    const resendAvailableAt = new Date(now + REGISTER_OTP_RESEND_COOLDOWN_SECONDS * 1000);
-
-    const sendResult = await sendRegisterOtpEmail({
-        toEmail: email,
-        otpCode,
-        expiresInMinutes: Math.floor(REGISTER_OTP_TTL_SECONDS / 60),
-    });
-
-    if (!sendResult?.sent) {
-        throw makeError("Unable to send OTP email, please configure SMTP and try again", 503);
-    }
-
-    await otpRef.set(
-        {
-            email,
-            codeHash: hashOtp(email, otpCode),
-            attempts: 0,
-            used: false,
-            expiresAt,
-            resendAvailableAt,
-            updatedAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-    );
-
-    return {
-        otpSent: true,
-        email: maskEmail(email),
-        expiresInSeconds: REGISTER_OTP_TTL_SECONDS,
-        resendAfterSeconds: REGISTER_OTP_RESEND_COOLDOWN_SECONDS,
-    };
-}
-
 export async function registerWithEmailAndPassword(payload) {
     const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
     const { email: rawEmail, password } = normalizeAuthPayload(normalized);
     const email = normalizeEmail(rawEmail);
-    const otpCode = getOtpCode(normalized);
     const {
         displayName = "",
         username = "",
@@ -375,15 +208,9 @@ export async function registerWithEmailAndPassword(payload) {
         throw makeError("email format is invalid", 400);
     }
 
-    if (!otpCode) {
-        throw makeError("otpCode is required", 400);
-    }
-
     if (String(password).length < 6) {
         throw makeError("password must be at least 6 characters", 400);
     }
-
-    const otpContext = await ensureRegisterOtpValid(email, otpCode);
 
     try {
         const auth = getAuth(firebaseApp);
@@ -401,15 +228,6 @@ export async function registerWithEmailAndPassword(payload) {
                 avatarUrl,
                 status,
                 createdAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
-
-        await otpContext.otpRef.set(
-            {
-                used: true,
-                usedAt: FieldValue.serverTimestamp(),
-                updatedAt: FieldValue.serverTimestamp(),
             },
             { merge: true }
         );

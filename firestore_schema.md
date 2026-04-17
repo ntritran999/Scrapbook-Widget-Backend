@@ -40,8 +40,12 @@ Fields:
 Subcollection:
 members/{userId}
 
+- userId (string): user id duplicated in document for collectionGroup query
 - role (string): admin / member
 - joinedAt (timestamp)
+- lastSeenMessageId (string | null): latest message id this member has read in the group
+- lastSeenAt (timestamp | null): server timestamp when member last read messages in the group
+- unreadCount (number): unread message count for group list badge
 
 Subcollection:
 invitations/{userId}

@@ -114,42 +114,82 @@ export async function getUserById(userId) {
 export async function getGroupsByUserId(userId) {
     const widgetsSnapshot = await usersCollection.doc(userId).collection("widgets").get();
 
-    const groupIds = new Set(
-        widgetsSnapshot.docs
-            .map((doc) => doc.data()?.groupId || doc.id)
-            .filter(Boolean)
+    let groupIds = Array.from(
+        new Set(
+            widgetsSnapshot.docs
+                .map((widgetDoc) => String(widgetDoc.data()?.groupId || widgetDoc.id || "").trim())
+                .filter(Boolean)
+        )
     );
 
-    const groupDocs = await Promise.all(
-        Array.from(groupIds).map((groupId) => db.collection("groups").doc(groupId).get())
-    );
+    // Backward compatibility: recover memberships if old data is missing widgets.
+    if (groupIds.length === 0) {
+        const legacyMemberships = await db.collectionGroup("members").get();
+        groupIds = Array.from(
+            new Set(
+                legacyMemberships.docs
+                    .filter((membershipDoc) => membershipDoc.id === userId)
+                    .map((membershipDoc) => membershipDoc.ref.parent.parent?.id)
+                    .filter(Boolean)
+            )
+        );
+    }
 
-    const groups = groupDocs
-        .filter((doc) => doc.exists)
-        .map((doc) => ({ id: doc.id, ...doc.data() }));
+    if (groupIds.length === 0) {
+        return [];
+    }
 
     const groupsWithLatestMessage = await Promise.all(
-        groups.map(async (group) => {
-            const latestMessageSnapshot = await db
-                .collection("groups")
-                .doc(group.id)
-                .collection("messages")
-                .orderBy("createdAt", "desc")
-                .limit(1)
-                .get();
+        groupIds.map(async (groupId) => {
+            const groupRef = db.collection("groups").doc(groupId);
+            const memberRef = groupRef.collection("members").doc(userId);
 
+            const [groupDoc, memberDoc, latestMessageSnapshot] = await Promise.all([
+                groupRef.get(),
+                memberRef.get(),
+                groupRef.collection("messages").orderBy("createdAt", "desc").limit(1).get(),
+            ]);
+
+            if (!groupDoc.exists || !memberDoc.exists) {
+                return null;
+            }
+
+            const memberData = memberDoc.data() || {};
             const latestMessage = latestMessageSnapshot.empty
                 ? null
                 : MessageModel.fromSnapshot(latestMessageSnapshot.docs[0]);
 
             return {
-                ...group,
+                id: groupDoc.id,
+                ...groupDoc.data(),
                 latestMessage,
+                role: String(memberData.role || "member"),
+                joinedAt: memberData.joinedAt ?? null,
+                lastSeenMessageId: String(memberData.lastSeenMessageId || "").trim() || null,
+                lastSeenAt: memberData.lastSeenAt ?? null,
+                unreadCount: Number.isFinite(Number(memberData.unreadCount))
+                    ? Math.max(0, Number(memberData.unreadCount))
+                    : 0,
             };
         })
     );
 
-    return groupsWithLatestMessage;
+    return groupsWithLatestMessage
+        .filter(Boolean)
+        .sort((left, right) => {
+            const leftTime = left?.latestMessage?.createdAt?.getTime
+                ? left.latestMessage.createdAt.getTime()
+                : 0;
+            const rightTime = right?.latestMessage?.createdAt?.getTime
+                ? right.latestMessage.createdAt.getTime()
+                : 0;
+
+            if (leftTime !== rightTime) {
+                return rightTime - leftTime;
+            }
+
+            return String(right?.id || "").localeCompare(String(left?.id || ""));
+        });
 }
 
 export async function createUser(payload) {

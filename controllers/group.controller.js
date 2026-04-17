@@ -27,10 +27,21 @@ import {
     addReaction,
     removePage
 } from "../services/group.service.js";
-import {
-    sendSseEvent,
-    subscribeToGroupMessages,
-} from "../services/messageRealtime.service.js";
+
+function resolveWebSocketBaseUrl(req) {
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+        .split(",")[0]
+        .trim();
+    const forwardedHost = String(req.headers["x-forwarded-host"] || "")
+        .split(",")[0]
+        .trim();
+
+    const protocol = forwardedProto || req.protocol || "http";
+    const host = forwardedHost || req.get("host") || "localhost:3000";
+    const wsProtocol = protocol === "https" ? "wss" : "ws";
+
+    return `${wsProtocol}://${host}`;
+}
 
 function normalizeUserIds(value) {
     if (!Array.isArray(value)) {
@@ -496,7 +507,20 @@ export async function postPageItem(req, res, next) {
 
 export async function getGroupMessages(req, res, next) {
     try {
-        const messages = await listMessages(req.params.groupId);
+        const { groupId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can access messages" });
+        }
+
+        const messages = await listMessages(groupId);
         res.json(messages);
     } catch (error) {
         next(error);
@@ -518,26 +542,13 @@ export async function streamGroupMessages(req, res, next) {
             return res.status(403).json({ message: "Only group members can access messages" });
         }
 
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.setHeader("X-Accel-Buffering", "no");
+        const wsBaseUrl = resolveWebSocketBaseUrl(req);
+        const wsPath = `/api/v1/groups/${encodeURIComponent(groupId)}/messages/ws`;
 
-        if (typeof res.flushHeaders === "function") {
-            res.flushHeaders();
-        }
-
-        const unsubscribe = subscribeToGroupMessages(groupId, res);
-        const initialMessages = await listMessages(groupId);
-        sendSseEvent(res, "messages.initial", initialMessages);
-
-        const heartbeat = setInterval(() => {
-            res.write(": heartbeat\n\n");
-        }, 25000);
-
-        req.on("close", () => {
-            clearInterval(heartbeat);
-            unsubscribe();
+        return res.status(426).json({
+            message: "Realtime stream moved to WebSocket",
+            wsUrl: `${wsBaseUrl}${wsPath}?token=<FIREBASE_ID_TOKEN>`,
+            events: ["stream.ready", "messages.initial", "message.created", "message.seen"],
         });
     } catch (error) {
         return next(error);
@@ -546,7 +557,23 @@ export async function streamGroupMessages(req, res, next) {
 
 export async function postGroupMessage(req, res, next) {
     try {
-        const message = await createMessage(req.params.groupId, req.body);
+        const { groupId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can send messages" });
+        }
+
+        const message = await createMessage(groupId, {
+            ...req.body,
+            createdBy: requesterId,
+        });
         res.status(201).json(message);
     } catch (error) {
         next(error);
@@ -555,10 +582,27 @@ export async function postGroupMessage(req, res, next) {
 
 export async function putSeenBy(req, res, next) {
     try {
+        const { groupId, messageId, userId } = req.params;
+        const requesterId = req.authUser?.uid;
+
+        if (requesterId !== userId) {
+            return res.status(403).json({ message: "forbidden" });
+        }
+
+        const group = await getGroupById(groupId);
+        if (!group) {
+            return res.status(404).json({ message: "Group not found" });
+        }
+
+        const requesterMember = await getMemberById(groupId, requesterId);
+        if (!requesterMember) {
+            return res.status(403).json({ message: "Only group members can mark message seen" });
+        }
+
         const seenBy = await markMessageSeen(
-            req.params.groupId,
-            req.params.messageId,
-            req.params.userId,
+            groupId,
+            messageId,
+            userId,
             req.body
         );
         res.json(seenBy);

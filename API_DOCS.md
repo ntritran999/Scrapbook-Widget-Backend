@@ -20,7 +20,6 @@ Environment variables required for auth:
   - `SMTP_USER`
   - `SMTP_PASS`
   - `SMTP_FROM`
-- Optional: `OTP_HASH_SECRET` for hashing register OTP codes at rest.
 
 Environment variables required for media storage:
 
@@ -160,8 +159,12 @@ Note:
 ```json
 {
   "id": "userId",
+  "userId": "userId",
   "role": "admin | member | string",
-  "joinedAt": "date | null"
+  "joinedAt": "date | null",
+  "lastSeenMessageId": "messageId | null",
+  "lastSeenAt": "date | null",
+  "unreadCount": 0
 }
 ```
 
@@ -222,7 +225,7 @@ Note:
 ```json
 {
   "id": "string",
-  "type": "string",
+  "type": "string"
 }
 ```
 
@@ -231,7 +234,7 @@ Note:
 ```json
 {
   "id": "string",
-  "type": "string",
+  "type": "string"
 }
 ```
 
@@ -295,67 +298,10 @@ Note:
 
 ### Register Flow (Android -> Node.js -> Firebase Auth)
 
-Email/password register now requires OTP confirmation.
+Email/password register is a single step.
 
-1. Client calls `POST /auth/register/request-otp` with email.
-2. Backend sends OTP to email.
-3. Client calls `POST /auth/register` with email/password/profile + `otpCode`.
-4. Backend verifies OTP first, then creates Firebase Auth user and profile.
-
-### POST `/auth/register/request-otp`
-
-Send OTP code for email/password registration.
-
-Request body:
-
-```json
-{
-  "email": "john@example.com"
-}
-```
-
-Response `200`:
-
-```json
-{
-  "otpSent": true,
-  "email": "j**n@example.com",
-  "expiresInSeconds": 600,
-  "resendAfterSeconds": 60
-}
-```
-
-Response `400`:
-
-```json
-{
-  "message": "email is required"
-}
-```
-
-Response `409`:
-
-```json
-{
-  "message": "email already exists"
-}
-```
-
-Response `429`:
-
-```json
-{
-  "message": "Please wait 45s before requesting another OTP"
-}
-```
-
-Response `503`:
-
-```json
-{
-  "message": "Unable to send OTP email, please configure SMTP and try again"
-}
-```
+1. Client calls `POST /auth/register` with email/password/profile.
+2. Backend creates Firebase Auth user and profile.
 
 ### POST `/auth/register`
 
@@ -367,7 +313,6 @@ Request body:
 {
   "email": "john@example.com",
   "password": "secret123",
-  "otpCode": "123456",
   "displayName": "John Doe",
   "username": "john_doe",
   "nickname": "John",
@@ -389,31 +334,7 @@ Response `400`:
 
 ```json
 {
-  "message": "email and password are required"
-}
-```
-
-Response `400`:
-
-```json
-{
-  "message": "otpCode is required"
-}
-```
-
-Response `400`:
-
-```json
-{
-  "message": "Invalid OTP code"
-}
-```
-
-Response `429`:
-
-```json
-{
-  "message": "Too many OTP attempts, please request a new OTP"
+  "message": "email and password are required (accepted keys: email/mail/userEmail + password/pass/userPassword)"
 }
 ```
 
@@ -436,11 +357,46 @@ Android flow:
 1. User taps "Sign in with Google" in app.
 2. App signs in with Firebase Auth Google provider.
 3. App obtains Firebase ID token from current Firebase user.
-4. App sends token to backend `POST /auth/google`.
-5. Backend verifies token using Firebase Admin SDK and upserts profile in Firestore.
-6. If account does not exist yet, backend auto-registers user in DB and creates a starter scrapbook group with default `Page 1`.
-7. App receives onboarding info (`defaultGroupId`, `defaultPageId`) and can open it immediately.
-8. After that, app uses `Authorization: Bearer <firebase_id_token>` to access internal APIs.
+4. App sends the token to backend `POST /auth/google` as `idToken` or `firebaseIdToken`.
+5. Backend verifies the Firebase ID token, upserts the user profile in Firestore, and marks the account as `provider: google.com`.
+6. If the account is new, backend creates the user record, starts a default scrapbook group with `Page 1`, and returns onboarding data.
+7. App receives `isNewUser`, `onboarding`, `welcomeEmail`, and `session` metadata in the response.
+8. For existing users, `onboarding` is `null` and `welcomeEmail` is skipped.
+9. After that, app uses `Authorization: Bearer <firebase_id_token>` to access internal APIs.
+
+Response `200`:
+
+```json
+{
+  "uid": "firebaseUid",
+  "email": "john@example.com",
+  "name": "John Doe",
+  "picture": "https://lh3.googleusercontent.com/...",
+  "isNewUser": true,
+  "onboarding": {
+    "defaultGroupId": "groupId",
+    "defaultGroupName": "John Doe's Scrapbook",
+    "defaultPageId": "pageId"
+  },
+  "welcomeEmail": {
+    "sent": true,
+    "skipped": false,
+    "reason": null
+  },
+  "session": {
+    "valid": true,
+    "authTime": 1711475082,
+    "issuedAt": 1711475090,
+    "expiresAt": 1711478690
+  }
+}
+```
+
+Notes:
+
+- `onboarding` is `null` when `isNewUser` is `false`.
+- `welcomeEmail` is best-effort and does not block login.
+- `welcomeEmail.reason` may be `smtp-not-configured`, `missing-target-email`, `send-failed`, or `not-a-new-user`.
 
 ### Login Flow (Android -> Node.js -> Firebase Auth)
 
@@ -760,6 +716,10 @@ Path params:
 
 - `userId`: user document id
 
+Authorization:
+
+- `:userId` must match Firebase token `uid`.
+
 Response `200`:
 
 ```json
@@ -792,6 +752,10 @@ Path params:
 
 - `userId`: user document id
 
+Authorization:
+
+- `:userId` must match Firebase token `uid`.
+
 Response `200`:
 
 ```json
@@ -802,6 +766,11 @@ Response `200`:
     "avatarUrl": "https://example.com/group-avatar.jpg",
     "createdBy": "userId",
     "createdAt": null,
+    "role": "member",
+    "joinedAt": "2026-04-01T08:00:00.000Z",
+    "lastSeenMessageId": "messageId",
+    "lastSeenAt": "2026-04-01T09:01:20.000Z",
+    "unreadCount": 2,
     "latestMessage": {
       "id": "messageId",
       "content": "Hello team",
@@ -815,7 +784,43 @@ Response `200`:
 
 Notes:
 
-- Current implementation returns `[]` when user has no group/widgets.
+- Current implementation returns `[]` when user has no group memberships.
+- `unreadCount`, `lastSeenMessageId`, and `lastSeenAt` are user-specific values from `groups/{groupId}/members/{userId}`.
+- Group list is sorted by `latestMessage.createdAt` descending.
+
+### WS `/users/:userId/groups/ws`
+
+Real-time group list stream for the authenticated user.
+
+Permissions:
+
+- Only the same authenticated user can connect (`token.uid` must match `:userId`).
+
+Authentication:
+
+- Preferred for browser clients: `?token=<firebase_id_token>` query param.
+- Also supported: `Authorization: Bearer <firebase_id_token>` during handshake.
+
+Local example:
+
+```text
+ws://localhost:3000/api/v1/users/<userId>/groups/ws?token=<firebase_id_token>
+```
+
+Events:
+
+- `stream.ready`: connection established.
+- `groups.initial`: initial list (same shape as `GET /users/:userId/groups`).
+- `group.latest-message.updated`: one updated group object whenever its `latestMessage` changes.
+
+Realtime read-state behavior:
+
+- On send message: sender `unreadCount` is reset to `0`, other members are incremented by `+1`.
+- On mark-seen: current member updates `lastSeenMessageId`, `lastSeenAt`, and recalculates `unreadCount`.
+
+### GET `/users/:userId/groups/ws`
+
+Returns `426` with WebSocket URL metadata when called via normal HTTP.
 
 ### POST `/users`
 
@@ -1271,6 +1276,9 @@ Response `200`:
     "id": "userId",
     "role": "admin",
     "joinedAt": null,
+    "lastSeenMessageId": "messageId",
+    "lastSeenAt": "2026-04-01T09:01:20.000Z",
+    "unreadCount": 0,
     "username": "john_doe",
     "avatarUrl": "https://example.com/avatar.jpg"
   }
@@ -1285,6 +1293,10 @@ Permissions:
 
 - Any existing group member can add.
 - Owner cannot be added again.
+
+Behavior:
+
+- New member is initialized with read-state defaults: `lastSeenMessageId = null`, `lastSeenAt = null`, `unreadCount = 0`.
 
 Response `200`: member object.
 
@@ -1356,6 +1368,7 @@ Behavior:
 - Invitation status -> `accepted`
 - Create `groups/{groupId}/members/{myId}` role `member`
 - Create/update `users/{myId}/widgets/{groupId}`
+- Member read-state defaults are initialized (`lastSeenMessageId = null`, `lastSeenAt = null`, `unreadCount = 0`).
 
 ### POST `/groups/:groupId/invitations/decline`
 
@@ -1367,7 +1380,7 @@ Behavior:
 
 ### GET `/groups/:groupId/invite-link`
 
-Get or generate the invite deep link for a group.
+Get or generate the invite link for a group.
 
 Permissions:
 
@@ -1382,7 +1395,7 @@ Behavior:
 - Verify group exists. Returns `404` if not found.
 - Verify authenticated user is a member of the group. Returns `403` if not a member.
 - Backend always generates a fresh unique 6-character uppercase invite code and overwrites any previous unused invite code for this group.
-- Returns both `inviteCode` and deep link in format `scrapbook://invite?code=<inviteCode>`.
+- Returns both `inviteCode` and invite link in format `https://scrapbook-widget-bait.vercel.app/?code=<inviteCode>`.
 - The invite code is intended for one successful join only.
 
 Response `200`:
@@ -1390,7 +1403,7 @@ Response `200`:
 ```json
 {
   "inviteCode": "X7A9K2",
-  "inviteLink": "scrapbook://invite?code=X7A9K2"
+  "inviteLink": "https://scrapbook-widget-bait.vercel.app/?code=X7A9K2"
 }
 ```
 
@@ -1434,6 +1447,7 @@ Behavior:
 - Create/update `users/{uid}/widgets/{groupId}` similar to invitation accept flow.
 - Clear `groups/{groupId}.inviteCode` back to empty string (`""`) in the same transaction after the join succeeds so the code cannot be reused.
 - If current user is already a member, endpoint still returns target group info and the used invite code is invalidated.
+- When a new member is created by join-by-link, read-state defaults are initialized (`lastSeenMessageId = null`, `lastSeenAt = null`, `unreadCount = 0`).
 
 Response `200`:
 
@@ -1621,12 +1635,12 @@ curl -X POST "http://localhost:3000/api/v1/groups/groupId/scrapbook-pages/pageId
   -H "Authorization: Bearer <firebase_id_token>" \
   -F "type=photo" \
   -F "createdBy=userId" \
-  -F "image=@/path/to/image.jpg" \
+  -F "file=@/path/to/image.jpg" \
   -F 'layout={"x":5,"y":10,"width":200,"height":150,"rotation":0,"scale":1,"zIndex":1}' \
   -F 'faceEmbeddings=[[0.12,-0.45,0.89,...],[...],...]'
 ```
 
-**Response `201`**: The `taggedUserIds` field contains user IDs automatically matched via face recognition (confidence threshold: 0.65).
+**Response `201`**: The `taggedUserIds` field contains user IDs automatically matched via face recognition (confidence threshold: 0.4).
 **Response `201`**: The `content.photoUrl` field contains the Cloudinary URL of the uploaded item.
 
 Response example:
@@ -1638,7 +1652,6 @@ Response example:
   "createdBy": "userId",
   "createdAt": "2024-01-15T10:30:00Z",
   "content": {
-    "photoUrl": "https://res.cloudinary.com/your-cloud-name/image/upload/...",
     "photoUrl": "https://res.cloudinary.com/your-cloud-name/image/upload/...",
     "cloudinaryPublicId": "scrapbooks/groupId/userId/photo/1705316400000"
   },
@@ -1659,9 +1672,10 @@ Response example:
 **Max File Size**: 50 MB
 
 **Face Recognition Details**:
+
 - Requires enrolled face vectors for group members (via `POST /users/:userId/enroll-face`)
 - Uses Cosine Similarity to match embeddings against member face vectors
-- Default confidence threshold: 0.65 (configurable via backend logic)
+- Default confidence threshold: 0.4 (configurable via backend logic)
 - Members without enrolled face vectors are skipped
 - Invalid or malformed embeddings are silently ignored
 
@@ -1701,6 +1715,10 @@ Response example:
 
 List group messages.
 
+Permissions:
+
+- Only existing group members can access.
+
 Response `200`:
 
 ```json
@@ -1728,94 +1746,111 @@ Response `200`:
 ]
 ```
 
-### GET `/groups/:groupId/messages/stream`
+### WS `/groups/:groupId/messages/ws`
 
-Real-time message stream using Server-Sent Events (SSE).
+Real-time message stream using WebSocket.
+
+Client implementation guide:
+
+- See `WEBSOCKET_CLIENT_GUIDE.md` for full client-side integration details.
 
 Permissions:
 
 - Any existing group member can connect.
 
-Headers:
+Authentication:
 
-```http
-Accept: text/event-stream
-Authorization: Bearer <firebase_id_token>
+- Preferred for browser clients: `?token=<firebase_id_token>` query param.
+- Also supported: `Authorization: Bearer <firebase_id_token>` during handshake.
+
+Local example:
+
+```text
+ws://localhost:3000/api/v1/groups/<groupId>/messages/ws?token=<firebase_id_token>
 ```
 
-Connection notes:
+Message format:
 
-- Keep the HTTP connection open.
-- Server sends heartbeat comments periodically.
-- Reconnect on disconnect from client side.
+```json
+{
+  "event": "message.created",
+  "data": {
+    "id": "messageId",
+    "content": "Hello team",
+    "createdBy": "senderUid",
+    "createdAt": "2026-04-01T09:00:00.000Z",
+    "type": "text",
+    "senderId": "senderUid",
+    "senderName": "John",
+    "senderAvatar": "https://example.com/avatar.jpg",
+    "time": "2026-04-01T09:00:00.000Z",
+    "seenBy": [
+      {
+        "id": "viewerUid",
+        "name": "Alice",
+        "avatarUrl": "https://example.com/alice.jpg",
+        "seenAt": "2026-04-01T09:01:20.000Z"
+      }
+    ],
+    "seenByText": "Seen by Alice"
+  }
+}
+```
 
 Events:
 
-- `stream.ready`: stream connection established.
+- `stream.ready`: connection established.
 - `messages.initial`: initial full message list (same shape as `GET /groups/:groupId/messages`).
 - `message.created`: a new created message object.
 - `message.seen`: updated message object after seen status changes.
 
-Example event payload (`message.created` / `message.seen`):
+Related realtime behavior:
 
-```json
-{
-  "id": "messageId",
-  "content": "Hello team",
-  "createdBy": "senderUid",
-  "createdAt": "2026-04-01T09:00:00.000Z",
-  "type": "text",
-  "senderId": "senderUid",
-  "senderName": "John",
-  "senderAvatar": "https://example.com/avatar.jpg",
-  "time": "2026-04-01T09:00:00.000Z",
-  "seenBy": [
-    {
-      "id": "viewerUid",
-      "name": "Alice",
-      "avatarUrl": "https://example.com/alice.jpg",
-      "seenAt": "2026-04-01T09:01:20.000Z"
-    }
-  ],
-  "seenByText": "Seen by Alice"
-}
-```
+- Each `message.created` and `message.seen` also updates user group-list stream subscribers on `WS /users/:userId/groups/ws` via event `group.latest-message.updated`.
 
-Response `403`:
+### GET `/groups/:groupId/messages/ws`
 
-```json
-{
-  "message": "Only group members can access messages"
-}
-```
+Returns `426` with WebSocket URL metadata when called via normal HTTP (handy for debugging/manual verification).
 
-Response `404`:
+### GET `/groups/:groupId/messages/stream`
 
-```json
-{
-  "message": "Group not found"
-}
-```
+Deprecated alias. Returns `426` with guidance to use WebSocket endpoint `/groups/:groupId/messages/ws`.
 
 ### POST `/groups/:groupId/messages`
 
 Create message.
+
+Permissions:
+
+- Only existing group members can send messages.
 
 Request body:
 
 ```json
 {
   "content": "Hello team",
-  "createdBy": "userId",
   "type": "text"
 }
 ```
+
+Note:
+
+- `createdBy` is inferred from Firebase token (`req.authUser.uid`).
+- Sender is auto-marked as seen for the newly created message (`seenBy/{senderId}`).
 
 Response `201`: created message object (same enriched shape as `GET /groups/:groupId/messages`).
 
 ### PUT `/groups/:groupId/messages/:messageId/seen-by/:userId`
 
 Mark a message as seen by user.
+
+Authorization:
+
+- `:userId` must match Firebase token `uid`.
+
+Permissions:
+
+- Only existing group members can mark message as seen.
 
 Request body:
 
@@ -1831,7 +1866,10 @@ Response `200`:
   "userId": "viewerUid",
   "name": "Alice",
   "avatarUrl": "https://example.com/alice.jpg",
-  "seenAt": "2026-04-01T09:01:20.000Z"
+  "seenAt": "2026-04-01T09:01:20.000Z",
+  "lastSeenMessageId": "messageId",
+  "lastSeenAt": "2026-04-01T09:01:20.000Z",
+  "unreadCount": 0
 }
 ```
 

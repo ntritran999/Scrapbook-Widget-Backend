@@ -10,8 +10,9 @@ import {
     ScrapbookPageModel,
     SeenByModel,
 } from "../models/index.js";
+import { normalizeTimestamp } from "../models/modelUtils.js";
 import { uploadToCloudinary } from "./cloudinary.service.js";
-import { publishGroupMessageEvent } from "./messageRealtime.service.js";
+import { publishGroupMessageEvent, publishUserGroupListEvent } from "./messageRealtime.service.js";
 
 const groupsCollection = db.collection("groups");
 const usersCollection = db.collection("users");
@@ -223,6 +224,66 @@ async function getMessageByIdEnriched(groupId, messageId) {
 
     const enriched = await enrichMessagesForUi(groupId, [messageDoc]);
     return enriched[0] || null;
+}
+
+function toGroupListLatestMessage(message) {
+    if (!message) {
+        return null;
+    }
+
+    return {
+        id: message.id || null,
+        content: message.content || "",
+        createdBy: message.createdBy || "",
+        createdAt: normalizeTimestamp(message.createdAt),
+        type: message.type || "text",
+    };
+}
+
+async function getLatestMessageForGroup(groupId) {
+    const latestMessageSnapshot = await groupsCollection
+        .doc(groupId)
+        .collection("messages")
+        .orderBy("createdAt", "desc")
+        .limit(1)
+        .get();
+
+    if (latestMessageSnapshot.empty) {
+        return null;
+    }
+
+    return MessageModel.fromSnapshot(latestMessageSnapshot.docs[0]);
+}
+
+function buildGroupListPayload(group, member, latestMessage) {
+    return {
+        ...group,
+        latestMessage: toGroupListLatestMessage(latestMessage),
+        role: member?.role || "member",
+        joinedAt: member?.joinedAt || null,
+        lastSeenMessageId: member?.lastSeenMessageId || null,
+        lastSeenAt: member?.lastSeenAt || null,
+        unreadCount: Number.isFinite(Number(member?.unreadCount))
+            ? Math.max(0, Number(member.unreadCount))
+            : 0,
+    };
+}
+
+async function countUnreadMessagesAfter(groupId, userId, seenMessageCreatedAt) {
+    if (!seenMessageCreatedAt) {
+        return 0;
+    }
+
+    const snapshot = await groupsCollection
+        .doc(groupId)
+        .collection("messages")
+        .where("createdAt", ">", seenMessageCreatedAt)
+        .get();
+
+    return snapshot.docs.reduce((count, doc) => {
+        const messageData = doc.data() || {};
+        return messageData.createdBy === userId ? count : count + 1;
+    }, 0);
 }
 
 function normalizeMemberIds(memberIds = [], ownerId) {
@@ -489,6 +550,28 @@ export async function listMembers(groupId) {
         username: userProfileMap.get(member.id)?.username || "",
         avatarUrl: userProfileMap.get(member.id)?.avatarUrl || "",
     }));
+}
+
+async function publishGroupLatestMessageUpdate(groupId, latestMessage) {
+    const groupRef = groupsCollection.doc(groupId);
+    const [group, membersSnapshot] = await Promise.all([
+        getGroupById(groupId),
+        groupRef.collection("members").get(),
+    ]);
+
+    if (!group || membersSnapshot.empty) {
+        return;
+    }
+
+    const resolvedLatestMessage = latestMessage === undefined
+        ? await getLatestMessageForGroup(groupId)
+        : latestMessage;
+
+    for (const memberDoc of membersSnapshot.docs) {
+        const member = MemberModel.fromSnapshot(memberDoc);
+        const payload = buildGroupListPayload(group, member, resolvedLatestMessage);
+        publishUserGroupListEvent(member.id, "group.latest-message.updated", payload);
+    }
 }
 
 export async function addOrUpdateMember(groupId, userId, payload) {
@@ -1079,29 +1162,110 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 }
 
 export async function listMessages(groupId) {
-    const snapshot = await groupsCollection
-        .doc(groupId)
-        .collection("messages")
-        .orderBy("createdAt", "asc")
-        .get();
-    return enrichMessagesForUi(groupId, snapshot.docs);
+    const snapshot = await groupsCollection.doc(groupId).collection("messages").get();
+    const sortedDocs = [...snapshot.docs].sort((left, right) => {
+        const leftTime = normalizeTimestamp(left.data()?.createdAt)?.getTime() ?? 0;
+        const rightTime = normalizeTimestamp(right.data()?.createdAt)?.getTime() ?? 0;
+
+        if (leftTime !== rightTime) {
+            return leftTime - rightTime;
+        }
+
+        return left.id.localeCompare(right.id);
+    });
+
+    return enrichMessagesForUi(groupId, sortedDocs);
 }
 
 export async function createMessage(groupId, payload) {
+    const senderId = String(payload?.createdBy || "").trim();
+    if (!senderId) {
+        const error = new Error("createdBy is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
+    const isSenderMember = membersSnapshot.docs.some((memberDoc) => memberDoc.id === senderId);
+    if (!isSenderMember) {
+        const error = new Error("Only group members can send messages");
+        error.statusCode = 403;
+        throw error;
+    }
+
     const docRef = groupsCollection.doc(groupId).collection("messages").doc();
+    const senderSeenByRef = docRef.collection("seenBy").doc(senderId);
     const message = new MessageModel({
         ...payload,
+        createdBy: senderId,
         createdAt: FieldValue.serverTimestamp(),
     });
     await docRef.set(message.toFirestore());
     const created = await docRef.get();
+
+    const membersBatch = db.batch();
+    membersBatch.set(
+        senderSeenByRef,
+        {
+            seenAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    for (const memberDoc of membersSnapshot.docs) {
+        const memberRef = memberDoc.ref;
+
+        if (memberDoc.id === senderId) {
+            membersBatch.set(
+                memberRef,
+                {
+                    lastSeenMessageId: docRef.id,
+                    lastSeenAt: FieldValue.serverTimestamp(),
+                    unreadCount: 0,
+                },
+                { merge: true }
+            );
+            continue;
+        }
+
+        membersBatch.set(
+            memberRef,
+            {
+                unreadCount: FieldValue.increment(1),
+            },
+            { merge: true }
+        );
+    }
+    await membersBatch.commit();
+
     const enriched = await enrichMessagesForUi(groupId, [created]);
     const createdMessage = enriched[0] || MessageModel.fromSnapshot(created);
     publishGroupMessageEvent(groupId, "message.created", createdMessage);
+    await publishGroupLatestMessageUpdate(groupId, MessageModel.fromSnapshot(created));
     return createdMessage;
 }
 
 export async function markMessageSeen(groupId, messageId, userId, payload = {}) {
+    const messageRef = groupsCollection.doc(groupId).collection("messages").doc(messageId);
+    const memberRef = groupsCollection.doc(groupId).collection("members").doc(userId);
+
+    const [messageSnapshot, memberSnapshot] = await Promise.all([
+        messageRef.get(),
+        memberRef.get(),
+    ]);
+
+    if (!messageSnapshot.exists) {
+        const error = new Error("Message not found");
+        error.statusCode = 404;
+        throw error;
+    }
+
+    if (!memberSnapshot.exists) {
+        const error = new Error("Only group members can mark message seen");
+        error.statusCode = 403;
+        throw error;
+    }
+
     const docRef = groupsCollection
         .doc(groupId)
         .collection("messages")
@@ -1109,15 +1273,29 @@ export async function markMessageSeen(groupId, messageId, userId, payload = {}) 
         .collection("seenBy")
         .doc(userId);
 
+    const resolvedSeenAt = normalizeTimestamp(payload.seenAt) || FieldValue.serverTimestamp();
+
     const seenBy = new SeenByModel({
         id: userId,
         ...payload,
-        seenAt: payload.seenAt ?? FieldValue.serverTimestamp(),
+        seenAt: resolvedSeenAt,
     });
 
     await docRef.set(seenBy.toFirestore(), { merge: true });
     const updated = await docRef.get();
     const updatedSeen = SeenByModel.fromSnapshot(updated);
+
+    const messageData = messageSnapshot.data() || {};
+    const unreadCount = await countUnreadMessagesAfter(groupId, userId, messageData.createdAt);
+
+    await memberRef.set(
+        {
+            lastSeenMessageId: messageId,
+            lastSeenAt: resolvedSeenAt,
+            unreadCount,
+        },
+        { merge: true }
+    );
 
     const profileMap = await getUserProfilesMap([userId]);
     const viewerProfile = profileMap.get(userId) || {
@@ -1129,6 +1307,7 @@ export async function markMessageSeen(groupId, messageId, userId, payload = {}) 
     const message = await getMessageByIdEnriched(groupId, messageId);
     if (message) {
         publishGroupMessageEvent(groupId, "message.seen", message);
+        await publishGroupLatestMessageUpdate(groupId);
     }
 
     return {
@@ -1137,6 +1316,9 @@ export async function markMessageSeen(groupId, messageId, userId, payload = {}) 
         name: viewerProfile.name,
         avatarUrl: viewerProfile.avatarUrl,
         seenAt: updatedSeen.seenAt,
+        lastSeenMessageId: messageId,
+        lastSeenAt: updatedSeen.seenAt,
+        unreadCount,
     };
 }
 

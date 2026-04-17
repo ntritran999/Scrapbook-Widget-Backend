@@ -67,6 +67,7 @@ router.post("/:groupId/scrapbook-pages/:pageId/:itemId/reactions", postReaction)
 router.delete("/:groupId/scrapbook-pages/:pageId/:itemId/:userId", deleteReaction);
 
 router.get("/:groupId/messages", getGroupMessages);
+router.get("/:groupId/messages/ws", streamGroupMessages);
 router.get("/:groupId/messages/stream", streamGroupMessages);
 router.post("/:groupId/messages", postGroupMessage);
 router.put("/:groupId/messages/:messageId/seen-by/:userId", putSeenBy);

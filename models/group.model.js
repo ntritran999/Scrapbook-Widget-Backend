@@ -1,10 +1,24 @@
 import { normalizeTimestamp } from "./modelUtils.js";
 
 export class MemberModel {
-    constructor({ id = null, role = "member", joinedAt = null } = {}) {
+    constructor({
+        id = null,
+        userId = null,
+        role = "member",
+        joinedAt = null,
+        lastSeenMessageId = null,
+        lastSeenAt = null,
+        unreadCount = 0,
+    } = {}) {
         this.id = id;
+        this.userId = String(userId || id || "").trim() || null;
         this.role = role;
         this.joinedAt = normalizeTimestamp(joinedAt);
+        this.lastSeenMessageId = String(lastSeenMessageId || "").trim() || null;
+        this.lastSeenAt = normalizeTimestamp(lastSeenAt);
+        this.unreadCount = Number.isFinite(Number(unreadCount))
+            ? Math.max(0, Number(unreadCount))
+            : 0;
     }
 
     static fromSnapshot(snapshot) {
@@ -13,8 +27,12 @@ export class MemberModel {
 
     toFirestore() {
         return {
+            userId: this.userId,
             role: this.role,
             joinedAt: this.joinedAt,
+            lastSeenMessageId: this.lastSeenMessageId,
+            lastSeenAt: this.lastSeenAt,
+            unreadCount: this.unreadCount,
         };
     }
 }
