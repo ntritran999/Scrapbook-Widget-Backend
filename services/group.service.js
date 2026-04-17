@@ -1152,7 +1152,53 @@ export async function createScrapbookItem(groupId, pageId, payload) {
             createdAt: FieldValue.serverTimestamp(),
         });
 
-        await docRef.set(item.toFirestore());
+        // Fetch group members and creator avatar for widget updates
+        const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
+        let senderAvatar = "";
+        
+        if (payload.createdBy) {
+            try {
+                const creatorDoc = await usersCollection.doc(payload.createdBy).get();
+                if (creatorDoc.exists) {
+                    senderAvatar = creatorDoc.data()?.avatarUrl || "";
+                }
+            } catch (error) {
+                console.warn("Warning: Failed to fetch creator avatar:", error.message);
+                // Continue with empty senderAvatar
+            }
+        }
+
+        // Extract photo URL only if item type is photo
+        let latestPhotoUrl = "";
+        if (processedPayload.type === "photo" && processedPayload.content?.photoUrl) {
+            latestPhotoUrl = processedPayload.content.photoUrl;
+        }
+
+        // Extract caption from content as status
+        const status = processedPayload.content?.caption || "";
+
+        // Build batch: item + widget updates for all members
+        const batch = db.batch();
+        batch.set(docRef, item.toFirestore());
+
+        for (const memberDoc of membersSnapshot.docs) {
+            const memberId = memberDoc.id;
+            const widgetRef = usersCollection.doc(memberId).collection("widgets").doc(groupId);
+            batch.set(
+                widgetRef,
+                {
+                    groupId,
+                    pageId,
+                    latestPhotoUrl,
+                    senderAvatar,
+                    status,
+                    updatedAt: FieldValue.serverTimestamp(),
+                },
+                { merge: true }
+            );
+        }
+
+        await batch.commit();
         const created = await docRef.get();
         return ScrapbookItemModel.fromSnapshot(created);
     } catch (error) {

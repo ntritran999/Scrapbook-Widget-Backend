@@ -322,7 +322,7 @@ export async function uploadAvatarForUser(userId, fileBuffer) {
 }
 
 export async function listUserWidgets(userId) {
-    const snapshot = await usersCollection.doc(userId).collection("widgets").get();
+    const snapshot = await usersCollection.doc(userId).collection("widgets").orderBy("updatedAt", "desc").get();
     return snapshot.docs.map(WidgetModel.fromSnapshot);
 }
 
