@@ -1,5 +1,6 @@
 import {
     deleteAccountByUid,
+    loginWithGoogleIdToken,
     loginWithEmailAndPassword,
     registerWithEmailAndPassword,
     signOutByUid,
@@ -57,6 +58,18 @@ export async function postSignout(req, res, next) {
 export async function deleteAccount(req, res, next) {
     try {
         const result = await deleteAccountByUid(req.authUser?.uid);
+        return res.status(200).json(result);
+    } catch (error) {
+        if (error?.statusCode) {
+            return res.status(error.statusCode).json({ message: error.message });
+        }
+        return next(error);
+    }
+}
+
+export async function postGoogleLogin(req, res, next) {
+    try {
+        const result = await loginWithGoogleIdToken(req.body);
         return res.status(200).json(result);
     } catch (error) {
         if (error?.statusCode) {

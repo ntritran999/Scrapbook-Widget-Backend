@@ -1,53 +1,91 @@
-const groupMessageSubscribers = new Map();
+import { WebSocket } from "ws";
 
-export function sendSseEvent(res, event, data) {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+const groupMessageSubscribers = new Map();
+const userGroupListSubscribers = new Map();
+
+function normalizeSubscriptionKey(value) {
+    return String(value || "").trim();
 }
 
-export function subscribeToGroupMessages(groupId, res) {
-    const key = String(groupId || "").trim();
-    if (!groupMessageSubscribers.has(key)) {
-        groupMessageSubscribers.set(key, new Set());
+function addSubscriber(subscriberMap, rawKey, socket) {
+    const key = normalizeSubscriptionKey(rawKey);
+    if (!key) {
+        return () => {};
     }
 
-    const subscribers = groupMessageSubscribers.get(key);
-    subscribers.add(res);
+    if (!subscriberMap.has(key)) {
+        subscriberMap.set(key, new Set());
+    }
 
-    sendSseEvent(res, "stream.ready", {
-        groupId: key,
-        connectedAt: new Date().toISOString(),
-    });
+    const subscribers = subscriberMap.get(key);
+    subscribers.add(socket);
 
     return () => {
-        const current = groupMessageSubscribers.get(key);
+        const current = subscriberMap.get(key);
         if (!current) {
             return;
         }
 
-        current.delete(res);
+        current.delete(socket);
         if (current.size === 0) {
-            groupMessageSubscribers.delete(key);
+            subscriberMap.delete(key);
         }
     };
 }
 
-export function publishGroupMessageEvent(groupId, event, payload) {
-    const key = String(groupId || "").trim();
-    const subscribers = groupMessageSubscribers.get(key);
+function publishToSubscribers(subscriberMap, rawKey, event, payload) {
+    const key = normalizeSubscriptionKey(rawKey);
+    if (!key) {
+        return;
+    }
+
+    const subscribers = subscriberMap.get(key);
     if (!subscribers || subscribers.size === 0) {
         return;
     }
 
-    for (const response of subscribers) {
+    for (const socket of subscribers) {
         try {
-            sendSseEvent(response, event, payload);
+            const sent = sendWebSocketEvent(socket, event, payload);
+            if (!sent) {
+                subscribers.delete(socket);
+            }
         } catch {
-            subscribers.delete(response);
+            subscribers.delete(socket);
         }
     }
 
     if (subscribers.size === 0) {
-        groupMessageSubscribers.delete(key);
+        subscriberMap.delete(key);
     }
+}
+
+export function sendWebSocketEvent(socket, event, data) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return false;
+    }
+
+    socket.send(
+        JSON.stringify({
+            event,
+            data,
+        })
+    );
+    return true;
+}
+
+export function subscribeToGroupMessages(groupId, socket) {
+    return addSubscriber(groupMessageSubscribers, groupId, socket);
+}
+
+export function publishGroupMessageEvent(groupId, event, payload) {
+    publishToSubscribers(groupMessageSubscribers, groupId, event, payload);
+}
+
+export function subscribeToUserGroupList(userId, socket) {
+    return addSubscriber(userGroupListSubscribers, userId, socket);
+}
+
+export function publishUserGroupListEvent(userId, event, payload) {
+    publishToSubscribers(userGroupListSubscribers, userId, event, payload);
 }

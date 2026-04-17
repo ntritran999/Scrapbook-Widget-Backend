@@ -16,6 +16,21 @@ function ensureSelfAccess(req, userId) {
     return req.authUser?.uid === userId;
 }
 
+function resolveWebSocketBaseUrl(req) {
+    const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+        .split(",")[0]
+        .trim();
+    const forwardedHost = String(req.headers["x-forwarded-host"] || "")
+        .split(",")[0]
+        .trim();
+
+    const protocol = forwardedProto || req.protocol || "http";
+    const host = forwardedHost || req.get("host") || "localhost:3000";
+    const wsProtocol = protocol === "https" ? "wss" : "ws";
+
+    return `${wsProtocol}://${host}`;
+}
+
 export async function getUsers(req, res, next) {
     try {
         const users = await listUsers();
@@ -52,11 +67,35 @@ export async function getUser(req, res, next) {
 
 export async function getUserGroups(req, res, next) {
     try {
+        if (!ensureSelfAccess(req, req.params.userId)) {
+            return res.status(403).json({ message: "forbidden" });
+        }
+
         const groups = await getGroupsByUserId(req.params.userId);
         if (!groups) {
             return res.status(404).json({ message: "Groups not found" });
         }
         return res.json(groups);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function streamUserGroups(req, res, next) {
+    try {
+        const targetUserId = String(req.params.userId || "").trim();
+        if (!ensureSelfAccess(req, targetUserId)) {
+            return res.status(403).json({ message: "forbidden" });
+        }
+
+        const wsBaseUrl = resolveWebSocketBaseUrl(req);
+        const wsPath = `/api/v1/users/${encodeURIComponent(targetUserId)}/groups/ws`;
+
+        return res.status(426).json({
+            message: "Realtime stream moved to WebSocket",
+            wsUrl: `${wsBaseUrl}${wsPath}?token=<FIREBASE_ID_TOKEN>`,
+            events: ["stream.ready", "groups.initial", "group.latest-message.updated"],
+        });
     } catch (error) {
         return next(error);
     }

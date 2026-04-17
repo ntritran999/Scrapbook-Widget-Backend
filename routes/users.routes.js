@@ -8,6 +8,7 @@ import {
     getUsersForInviteController,
     getUsers,
     getUserGroups,
+    streamUserGroups,
     getWidgets,
     patchUser,
     postAvatar,
@@ -26,6 +27,7 @@ router.post("/avatar", uploadImage, handleUploadError, postAvatar);
 
 router.get("/", getUsers);
 router.get("/:userId", getUser);
+router.get("/:userId/groups/ws", streamUserGroups);
 router.get("/:userId/groups", getUserGroups);
 router.post("/", postUser);
 router.patch("/:userId", patchUser);

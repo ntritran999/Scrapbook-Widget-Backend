@@ -2,6 +2,8 @@ import { getAuth } from "firebase-admin/auth";
 import { FieldPath, FieldValue } from "firebase-admin/firestore";
 
 import { db, firebaseApp } from "../firebaseConfig.js";
+import { createGroupWithMembers } from "./group.service.js";
+import { sendNewGoogleAccountWelcomeEmail } from "./mail.service.js";
 
 const usersCollection = db.collection("users");
 const groupsCollection = db.collection("groups");
@@ -42,6 +44,15 @@ function normalizeAuthPayload(payload = {}) {
     };
 }
 
+function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+
 function mapFirebaseLoginError(firebaseMessage = "") {
     if (
         firebaseMessage === "INVALID_PASSWORD" ||
@@ -61,6 +72,34 @@ function mapFirebaseLoginError(firebaseMessage = "") {
 
 function normalizeUid(uid) {
     return String(uid || "").trim();
+}
+
+function extractIdToken(payload = {}) {
+    const raw = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const tokenCandidate = raw?.idToken ?? raw?.firebaseIdToken ?? "";
+    return String(tokenCandidate).trim();
+}
+
+function deriveUsernameFromToken(decodedToken = {}) {
+    const emailLocalPart = String(decodedToken?.email || "").split("@")[0] || "";
+    const displayName = String(decodedToken?.name || "");
+    const source = (emailLocalPart || displayName || "user").toLowerCase();
+    const normalized = source.replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").slice(0, 20);
+
+    if (normalized.length >= 3) {
+        return normalized;
+    }
+
+    const uidPart = normalizeUid(decodedToken?.uid).slice(0, 6) || "guest";
+    return `user_${uidPart}`;
+}
+
+function buildDefaultScrapbookName(decodedToken = {}) {
+    const displayName = String(decodedToken?.name || "").trim();
+    if (!displayName) {
+        return "My Scrapbook";
+    }
+    return `${displayName}'s Scrapbook`;
 }
 
 function isAccountBlocked(userData = {}) {
@@ -148,7 +187,8 @@ function createBatchWriter() {
 
 export async function registerWithEmailAndPassword(payload) {
     const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    const { email, password } = normalizeAuthPayload(normalized);
+    const { email: rawEmail, password } = normalizeAuthPayload(normalized);
+    const email = normalizeEmail(rawEmail);
     const {
         displayName = "",
         username = "",
@@ -162,6 +202,10 @@ export async function registerWithEmailAndPassword(payload) {
             "email and password are required (accepted keys: email/mail/userEmail + password/pass/userPassword)",
             400
         );
+    }
+
+    if (!isValidEmail(email)) {
+        throw makeError("email format is invalid", 400);
     }
 
     if (String(password).length < 6) {
@@ -258,7 +302,7 @@ export async function loginWithEmailAndPassword(payload) {
 }
 
 export async function verifyIdTokenAndCreateSession(payload) {
-    const { idToken } = payload;
+    const idToken = extractIdToken(payload);
 
     if (!idToken) {
         throw makeError("idToken is required", 400);
@@ -283,6 +327,111 @@ export async function verifyIdTokenAndCreateSession(payload) {
         email: decodedToken.email || null,
         name: decodedToken.name || null,
         picture: decodedToken.picture || null,
+        session: {
+            valid: true,
+            authTime: decodedToken.auth_time || null,
+            issuedAt: decodedToken.iat || null,
+            expiresAt: decodedToken.exp || null,
+        },
+    };
+}
+
+export async function loginWithGoogleIdToken(payload) {
+    const idToken = extractIdToken(payload);
+
+    if (!idToken) {
+        throw makeError("idToken is required", 400);
+    }
+
+    let decodedToken;
+    try {
+        decodedToken = await getAuth(firebaseApp).verifyIdToken(idToken);
+    } catch (error) {
+        if (
+            error?.code === "auth/id-token-expired" ||
+            error?.code === "auth/invalid-id-token" ||
+            error?.code === "auth/argument-error"
+        ) {
+            throw makeError("invalid or expired idToken", 401);
+        }
+        throw error;
+    }
+
+    const uid = normalizeUid(decodedToken.uid);
+    if (!uid) {
+        throw makeError("invalid or expired idToken", 401);
+    }
+
+    const userRef = usersCollection.doc(uid);
+    const userSnapshot = await userRef.get();
+
+    if (userSnapshot.exists && isAccountBlocked(userSnapshot.data())) {
+        await getAuth(firebaseApp).revokeRefreshTokens(uid);
+        throw makeError("account is inactive or deleted", 403);
+    }
+
+    const isNewUser = !userSnapshot.exists;
+    const upsertPayload = {
+        email: decodedToken.email || "",
+        nickname: decodedToken.name || "",
+        avatarUrl: decodedToken.picture || "",
+        status: "active",
+        provider: "google.com",
+        lastLoginAt: FieldValue.serverTimestamp(),
+    };
+
+    if (isNewUser) {
+        upsertPayload.username = deriveUsernameFromToken(decodedToken);
+        upsertPayload.createdAt = FieldValue.serverTimestamp();
+    }
+
+    await userRef.set(upsertPayload, { merge: true });
+
+    let onboarding = null;
+    let welcomeEmail = {
+        sent: false,
+        skipped: true,
+        reason: "not-a-new-user",
+    };
+
+    if (isNewUser) {
+        const starterGroup = await createGroupWithMembers({
+            groupName: buildDefaultScrapbookName(decodedToken),
+            avatarUrl: "",
+            createdBy: uid,
+            memberIds: [],
+        });
+
+        onboarding = {
+            defaultGroupId: starterGroup.id,
+            defaultGroupName: starterGroup.groupName,
+            defaultPageId: starterGroup.latestPage?.id || null,
+        };
+
+        try {
+            welcomeEmail = await sendNewGoogleAccountWelcomeEmail({
+                toEmail: decodedToken.email,
+                displayName: decodedToken.name,
+                defaultGroupName: starterGroup.groupName,
+            });
+        } catch (error) {
+            console.warn("Failed to send welcome email for new Google account:", error);
+            welcomeEmail = {
+                sent: false,
+                skipped: false,
+                reason: "send-failed",
+            };
+        }
+    }
+
+    return {
+        uid,
+        email: decodedToken.email || null,
+        name: decodedToken.name || null,
+        picture: decodedToken.picture || null,
+        isNewUser,
+        onboarding,
+        welcomeEmail,
         session: {
             valid: true,
             authTime: decodedToken.auth_time || null,
