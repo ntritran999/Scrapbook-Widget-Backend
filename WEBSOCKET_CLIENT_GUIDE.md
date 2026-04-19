@@ -39,6 +39,14 @@ Server events:
 - `messages.initial`: initial full message list.
 - `message.created`: one newly created message.
 - `message.seen`: one updated message after seen status changes.
+- `item.created`: emitted on the same socket when a new scrapbook photo item is created.
+- `scrapbook.updated`: emitted on the same socket for non-photo scrapbook updates such as page create/delete or non-photo item create.
+
+Multiplexing note:
+
+- Frontend should keep a single WebSocket connection to `/api/v1/groups/:groupId/messages/ws`.
+- Chat events and Scrapbook events are multiplexed on that same group channel.
+- Client should filter by `event` instead of opening a second socket.
 
 ## 3. Important Ordering Rule
 
@@ -167,6 +175,14 @@ export function connectGroupMessageSocket(params: {
 
               if (event === "message.created" || event === "message.seen") {
                 onMessageUpsert(data);
+                return;
+              }
+
+              if (
+                (event === "item.created" && data?.type === "photo") ||
+                event.startsWith("scrapbook.")
+              ) {
+                // Debounce and refetch scrapbook via REST API
               }
             } catch {
               // Ignore malformed messages
@@ -221,11 +237,46 @@ export function connectGroupMessageSocket(params: {
 
 - Use `/api/v1/groups/:groupId/messages/ws`.
 - Pass Firebase ID token (query string or handshake header).
-- Handle `stream.ready`, `messages.initial`, `message.created`, `message.seen`.
+- Handle `stream.ready`, `messages.initial`, `message.created`, `message.seen`, `item.created`, `scrapbook.updated`.
 - Merge by message `id` to avoid duplicates/race issues.
+- If `event === "item.created"` and `data.type === "photo"`, or `event.startsWith("scrapbook.")`, debounce then reload scrapbook via REST API.
 - Reconnect with backoff for transient network errors.
 
-## 8. Group List Stream (Latest Message Updates)
+## 8. Scrapbook Event Payloads
+
+All scrapbook realtime packets use the same outer wrapper:
+
+```json
+{
+  "event": "item.created",
+  "data": {
+    "id": "itemId",
+    "scrapbookPageId": "pageId",
+    "type": "photo",
+    "createdBy": "userId"
+  }
+}
+```
+
+Supported scrapbook events on the group message socket:
+
+- `item.created`: currently emitted when a new photo item is created.
+- `scrapbook.updated`: emitted for scrapbook changes that should trigger a refetch even when payload is not a photo item.
+
+Example `scrapbook.updated` packet:
+
+```json
+{
+  "event": "scrapbook.updated",
+  "data": {
+    "action": "page.created",
+    "scrapbookPageId": "pageId",
+    "createdBy": "userId"
+  }
+}
+```
+
+## 9. Group List Stream (Latest Message Updates)
 
 Use this stream to keep the group list in sync when `latestMessage` changes.
 

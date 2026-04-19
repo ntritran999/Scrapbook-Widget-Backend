@@ -548,7 +548,14 @@ export async function streamGroupMessages(req, res, next) {
         return res.status(426).json({
             message: "Realtime stream moved to WebSocket",
             wsUrl: `${wsBaseUrl}${wsPath}?token=<FIREBASE_ID_TOKEN>`,
-            events: ["stream.ready", "messages.initial", "message.created", "message.seen"],
+            events: [
+                "stream.ready",
+                "messages.initial",
+                "message.created",
+                "message.seen",
+                "item.created",
+                "scrapbook.updated",
+            ],
         });
     } catch (error) {
         return next(error);

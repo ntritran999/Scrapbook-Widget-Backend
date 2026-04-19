@@ -78,8 +78,12 @@ export function subscribeToGroupMessages(groupId, socket) {
     return addSubscriber(groupMessageSubscribers, groupId, socket);
 }
 
-export function publishGroupMessageEvent(groupId, event, payload) {
+export function publishGroupRealtimeEvent(groupId, event, payload) {
     publishToSubscribers(groupMessageSubscribers, groupId, event, payload);
+}
+
+export function publishGroupMessageEvent(groupId, event, payload) {
+    publishGroupRealtimeEvent(groupId, event, payload);
 }
 
 export function subscribeToUserGroupList(userId, socket) {

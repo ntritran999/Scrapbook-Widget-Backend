@@ -12,7 +12,11 @@ import {
 } from "../models/index.js";
 import { normalizeTimestamp } from "../models/modelUtils.js";
 import { uploadToCloudinary } from "./cloudinary.service.js";
-import { publishGroupMessageEvent, publishUserGroupListEvent } from "./messageRealtime.service.js";
+import {
+    publishGroupMessageEvent,
+    publishGroupRealtimeEvent,
+    publishUserGroupListEvent,
+} from "./messageRealtime.service.js";
 
 const groupsCollection = db.collection("groups");
 const usersCollection = db.collection("users");
@@ -900,11 +904,25 @@ export async function createScrapbookPageAndUpdateWidgets(groupId, payload) {
 
     await batch.commit();
     const created = await docRef.get();
-    return ScrapbookPageModel.fromSnapshot(created);
+    const createdPage = ScrapbookPageModel.fromSnapshot(created);
+
+    publishGroupRealtimeEvent(groupId, "scrapbook.updated", {
+        action: "page.created",
+        scrapbookPageId: createdPage.id,
+        createdBy: createdPage.createdBy,
+    });
+
+    return createdPage;
 }
 
 export async function removePage(groupId, pageId) {
     const result = await groupsCollection.doc(groupId).collection("scrapbookPages").doc(pageId).delete();
+
+    publishGroupRealtimeEvent(groupId, "scrapbook.updated", {
+        action: "page.deleted",
+        scrapbookPageId: String(pageId || ""),
+    });
+
     return result;
 }
 
@@ -930,6 +948,15 @@ function normalizeTaggedUserIds(taggedUserIds = []) {
                 .filter(Boolean)
         )
     );
+}
+
+function buildScrapbookRealtimePayload({ id = "", scrapbookPageId = "", type = "", createdBy = "" } = {}) {
+    return {
+        id: String(id || ""),
+        scrapbookPageId: String(scrapbookPageId || ""),
+        type: String(type || ""),
+        createdBy: String(createdBy || ""),
+    };
 }
 
 function isOnThisDayFromPreviousYears(date, referenceDate = new Date()) {
@@ -1200,7 +1227,24 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 
         await batch.commit();
         const created = await docRef.get();
-        return ScrapbookItemModel.fromSnapshot(created);
+        const createdItem = ScrapbookItemModel.fromSnapshot(created);
+        const realtimePayload = buildScrapbookRealtimePayload({
+            id: createdItem.id,
+            scrapbookPageId: pageId,
+            type: createdItem.type,
+            createdBy: createdItem.createdBy,
+        });
+
+        if (createdItem.type === "photo") {
+            publishGroupRealtimeEvent(groupId, "item.created", realtimePayload);
+        } else {
+            publishGroupRealtimeEvent(groupId, "scrapbook.updated", {
+                action: "item.created",
+                ...realtimePayload,
+            });
+        }
+
+        return createdItem;
     } catch (error) {
         console.error("Error creating scrapbook item:", error);
         throw error;
