@@ -1559,6 +1559,7 @@ Behavior:
 
 - `createdBy` is inferred from Firebase token.
 - After page created, widgets of all group members are updated (`pageId`, `latestPhotoUrl`, `updatedAt`).
+- Backend also broadcasts `scrapbook.updated` on the existing group WebSocket channel `WS /groups/:groupId/messages/ws`.
 
 Response `201`: scrapbook page object.
 
@@ -1642,6 +1643,12 @@ curl -X POST "http://localhost:3000/api/v1/groups/groupId/scrapbook-pages/pageId
 
 **Response `201`**: The `taggedUserIds` field contains user IDs automatically matched via face recognition (confidence threshold: 0.4).
 **Response `201`**: The `content.photoUrl` field contains the Cloudinary URL of the uploaded item.
+
+Realtime behavior:
+
+- No extra WebSocket endpoint is created for scrapbook.
+- When a new photo item is created, backend broadcasts `item.created` on `WS /groups/:groupId/messages/ws`.
+- When a non-photo scrapbook item is created, backend broadcasts `scrapbook.updated` on that same socket so clients can debounce and refetch scrapbook data.
 
 Response example:
 
@@ -1803,10 +1810,31 @@ Events:
 - `messages.initial`: initial full message list (same shape as `GET /groups/:groupId/messages`).
 - `message.created`: a new created message object.
 - `message.seen`: updated message object after seen status changes.
+- `item.created`: scrapbook photo item created on the same group socket. Payload:
+
+```json
+{
+  "id": "itemId",
+  "scrapbookPageId": "pageId",
+  "type": "photo",
+  "createdBy": "userId"
+}
+```
+
+- `scrapbook.updated`: non-chat scrapbook change on the same group socket. Example payload:
+
+```json
+{
+  "action": "page.created",
+  "scrapbookPageId": "pageId",
+  "createdBy": "userId"
+}
+```
 
 Related realtime behavior:
 
 - Each `message.created` and `message.seen` also updates user group-list stream subscribers on `WS /users/:userId/groups/ws` via event `group.latest-message.updated`.
+- Scrapbook realtime notifications are multiplexed into this same `/messages/ws` connection to avoid opening an additional socket per group.
 
 ### GET `/groups/:groupId/messages/ws`
 
