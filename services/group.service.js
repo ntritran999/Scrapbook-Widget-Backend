@@ -17,10 +17,46 @@ import {
     publishGroupRealtimeEvent,
     publishUserGroupListEvent,
 } from "./messageRealtime.service.js";
+import {
+    sendGroupEventNotificationSafely,
+    sendNewMessageNotifications,
+    sendNewPhotoNotifications,
+    sendPhotoReactionNotifications,
+} from "./notification.service.js";
 
 const groupsCollection = db.collection("groups");
 const usersCollection = db.collection("users");
+const FREE_SCRAPBOOK_PAGE_LIMIT = 7;
 const TODAY_MEMORY_FALLBACK_LIMIT = 10;
+
+function isPremiumUserRecord(data = {}) {
+    return data?.isPremium === true || data?.premium === true;
+}
+
+async function assertCanCreateScrapbookPage(groupId, userId) {
+    const normalizedGroupId = String(groupId || "").trim();
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedGroupId || !normalizedUserId) {
+        return;
+    }
+
+    const [userDoc, pagesSnapshot] = await Promise.all([
+        usersCollection.doc(normalizedUserId).get(),
+        groupsCollection.doc(normalizedGroupId).collection("scrapbookPages").get(),
+    ]);
+
+    if (isPremiumUserRecord(userDoc.data() || {})) {
+        return;
+    }
+
+    if (pagesSnapshot.size >= FREE_SCRAPBOOK_PAGE_LIMIT) {
+        const error = new Error(
+            `non-premium accounts can only create up to ${FREE_SCRAPBOOK_PAGE_LIMIT} scrapbook pages`
+        );
+        error.statusCode = 403;
+        throw error;
+    }
+}
 
 // Utility: Calculate Cosine Similarity between two vectors
 function cosineSimilarity(vecA, vecB) {
@@ -861,7 +897,18 @@ export async function listScrapbookPages(groupId) {
         .doc(groupId)
         .collection("scrapbookPages")
         .get();
-    return snapshot.docs.map(ScrapbookPageModel.fromSnapshot);
+    return snapshot.docs
+        .map(ScrapbookPageModel.fromSnapshot)
+        .sort((left, right) => {
+            const leftTime = left.createdAt instanceof Date ? left.createdAt.getTime() : 0;
+            const rightTime = right.createdAt instanceof Date ? right.createdAt.getTime() : 0;
+
+            if (leftTime !== rightTime) {
+                return leftTime - rightTime;
+            }
+
+            return String(left.id || "").localeCompare(String(right.id || ""));
+        });
 }
 
 export async function createScrapbookPage(groupId, payload) {
@@ -876,16 +923,38 @@ export async function createScrapbookPage(groupId, payload) {
 }
 
 export async function createScrapbookPageAndUpdateWidgets(groupId, payload) {
+    await assertCanCreateScrapbookPage(groupId, payload?.createdBy);
+
     const docRef = groupsCollection.doc(groupId).collection("scrapbookPages").doc();
+    const messageRef = groupsCollection.doc(groupId).collection("messages").doc();
+    const senderSeenByRef = messageRef.collection("seenBy").doc(payload?.createdBy);
     const page = new ScrapbookPageModel({
         ...payload,
         createdAt: FieldValue.serverTimestamp(),
+    });
+    const pageTitle = String(payload?.title || "").trim() || "Untitled page";
+    const pageLogMessage = new MessageModel({
+        content: `Added scrapbook page: ${pageTitle}`,
+        createdBy: String(payload?.createdBy || "").trim(),
+        createdAt: FieldValue.serverTimestamp(),
+        type: "add_page",
     });
 
     const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
 
     const batch = db.batch();
     batch.set(docRef, page.toFirestore());
+    batch.set(messageRef, pageLogMessage.toFirestore());
+
+    if (payload?.createdBy) {
+        batch.set(
+            senderSeenByRef,
+            {
+                seenAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+    }
 
     for (const memberDoc of membersSnapshot.docs) {
         const memberId = memberDoc.id;
@@ -900,19 +969,69 @@ export async function createScrapbookPageAndUpdateWidgets(groupId, payload) {
             },
             { merge: true }
         );
+
+        if (memberId === payload?.createdBy) {
+            batch.set(
+                memberDoc.ref,
+                {
+                    lastSeenMessageId: messageRef.id,
+                    lastSeenAt: FieldValue.serverTimestamp(),
+                    unreadCount: 0,
+                },
+                { merge: true }
+            );
+            continue;
+        }
+
+        batch.set(
+            memberDoc.ref,
+            {
+                unreadCount: FieldValue.increment(1),
+            },
+            { merge: true }
+        );
     }
 
     await batch.commit();
-    const created = await docRef.get();
-    const createdPage = ScrapbookPageModel.fromSnapshot(created);
+    const [createdPageSnapshot, createdMessageSnapshot] = await Promise.all([
+        docRef.get(),
+        messageRef.get(),
+    ]);
+    const createdPage = ScrapbookPageModel.fromSnapshot(createdPageSnapshot);
+    const createdMessage = await getMessageByIdEnriched(groupId, createdMessageSnapshot.id);
 
     publishGroupRealtimeEvent(groupId, "scrapbook.updated", {
         action: "page.created",
         scrapbookPageId: createdPage.id,
         createdBy: createdPage.createdBy,
     });
+    if (createdMessage) {
+        publishGroupMessageEvent(groupId, "message.created", createdMessage);
+        await publishGroupLatestMessageUpdate(
+            groupId,
+            MessageModel.fromSnapshot(createdMessageSnapshot)
+        );
+    }
 
     return createdPage;
+}
+
+function buildReactionRealtimePayload({
+    itemId = "",
+    pageId = "",
+    groupId = "",
+    userId = "",
+    type = "",
+    action = "created",
+} = {}) {
+    return {
+        itemId: String(itemId || ""),
+        scrapbookPageId: String(pageId || ""),
+        groupId: String(groupId || ""),
+        userId: String(userId || ""),
+        type: String(type || ""),
+        action: String(action || "created"),
+    };
 }
 
 export async function removePage(groupId, pageId) {
@@ -1181,6 +1300,7 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 
         // Fetch group members and creator avatar for widget updates
         const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
+        const memberIds = membersSnapshot.docs.map((memberDoc) => memberDoc.id);
         let senderAvatar = "";
         
         if (payload.createdBy) {
@@ -1237,6 +1357,13 @@ export async function createScrapbookItem(groupId, pageId, payload) {
 
         if (createdItem.type === "photo") {
             publishGroupRealtimeEvent(groupId, "item.created", realtimePayload);
+            await sendGroupEventNotificationSafely(sendNewPhotoNotifications, {
+                groupId,
+                pageId,
+                itemId: createdItem.id,
+                senderId: createdItem.createdBy,
+                memberIds,
+            });
         } else {
             publishGroupRealtimeEvent(groupId, "scrapbook.updated", {
                 action: "item.created",
@@ -1276,6 +1403,7 @@ export async function createMessage(groupId, payload) {
     }
 
     const membersSnapshot = await groupsCollection.doc(groupId).collection("members").get();
+    const memberIds = membersSnapshot.docs.map((memberDoc) => memberDoc.id);
     const isSenderMember = membersSnapshot.docs.some((memberDoc) => memberDoc.id === senderId);
     if (!isSenderMember) {
         const error = new Error("Only group members can send messages");
@@ -1332,6 +1460,13 @@ export async function createMessage(groupId, payload) {
     const createdMessage = enriched[0] || MessageModel.fromSnapshot(created);
     publishGroupMessageEvent(groupId, "message.created", createdMessage);
     await publishGroupLatestMessageUpdate(groupId, MessageModel.fromSnapshot(created));
+    await sendGroupEventNotificationSafely(sendNewMessageNotifications, {
+        groupId,
+        senderId,
+        messageId: createdMessage.id,
+        content: createdMessage.content,
+        memberIds,
+    });
     return createdMessage;
 }
 
@@ -1425,11 +1560,32 @@ export async function listItemReactions(groupId, pageId, itemId) {
 }
 
 export async function addReaction(groupId, pageId, itemId, payload) {
+    const reactorId = String(payload?.id || "").trim();
+    const reactionType = String(payload?.type || "").trim();
+    if (!reactorId) {
+        const error = new Error("id is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    if (!reactionType) {
+        const error = new Error("type is required");
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const item = await getItemById(groupId, pageId, itemId);
+    if (!item) {
+        const error = new Error("Item not found");
+        error.statusCode = 404;
+        throw error;
+    }
+
     const reaction = new ReactionModel({
-        id: payload.id,
-        type: payload.type,
+        id: reactorId,
+        type: reactionType,
     });
-    const res = await groupsCollection
+    await groupsCollection
         .doc(groupId)
         .collection("scrapbookPages")
         .doc(pageId)
@@ -1439,21 +1595,61 @@ export async function addReaction(groupId, pageId, itemId, payload) {
         .doc(reaction.id)
         .set(reaction.toFirestore());
 
-    return res;
+    const realtimePayload = buildReactionRealtimePayload({
+        itemId,
+        pageId,
+        groupId,
+        userId: reactorId,
+        type: reactionType,
+        action: "created",
+    });
+    publishGroupRealtimeEvent(groupId, "reaction.created", realtimePayload);
+
+    await sendGroupEventNotificationSafely(sendPhotoReactionNotifications, {
+        groupId,
+        pageId,
+        itemId,
+        ownerId: item.createdBy,
+        reactorId,
+        reactionType,
+    });
+
+    return {
+        ...reaction,
+        itemId,
+        scrapbookPageId: pageId,
+        groupId,
+    };
 }
 
 export async function removeReaction(groupId, pageId, itemId, userId) {
-    const res = await groupsCollection
+    const reactionRef = groupsCollection
         .doc(groupId)
         .collection("scrapbookPages")
         .doc(pageId)
         .collection("items")
         .doc(itemId)
         .collection("reactions")
-        .doc(userId)
-        .delete();
+        .doc(userId);
+    const existingReaction = await reactionRef.get();
+    await reactionRef.delete();
 
-    return res;
+    publishGroupRealtimeEvent(groupId, "reaction.removed", buildReactionRealtimePayload({
+        itemId,
+        pageId,
+        groupId,
+        userId,
+        type: existingReaction.exists ? existingReaction.data()?.type : "",
+        action: "removed",
+    }));
+
+    return {
+        success: true,
+        itemId,
+        scrapbookPageId: pageId,
+        groupId,
+        userId,
+    };
 }
 
 function generateInviteCode(length = INVITE_CODE_LENGTH) {

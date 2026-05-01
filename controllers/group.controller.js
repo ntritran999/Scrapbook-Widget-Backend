@@ -631,15 +631,17 @@ export async function postReaction(req, res, next) {
     try {
         const payload = {... req.body};
         const result = await addReaction(req.params.groupId, req.params.pageId, req.params.itemId, payload);
+        return res.status(201).json(result);
     } catch (error) {
-        next(error);
+        return next(error);
     }
 }
 
 export async function deleteReaction(req, res, next) {
     try {
         const result = await removeReaction(req.params.groupId, req.params.pageId, req.params.itemId, req.params.userId);
+        return res.status(200).json(result);
     } catch (error) {
-        next(error);
+        return next(error);
     }
 }

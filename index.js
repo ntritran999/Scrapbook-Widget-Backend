@@ -58,8 +58,18 @@ function shortenPayload(payload, maxLen = 1500) {
     }
 }
 
+function isNotificationLogRequest(req) {
+    const path = String(req.originalUrl || "");
+    return path.includes("/device-token");
+}
+
 if (process.env.NODE_ENV !== "production") {
     app.use((req, res, next) => {
+        if (!isNotificationLogRequest(req)) {
+            next();
+            return;
+        }
+
         const startedAt = Date.now();
         const requestId = Math.random().toString(36).slice(2, 10);
 
