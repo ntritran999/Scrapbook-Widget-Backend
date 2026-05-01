@@ -10,6 +10,9 @@ import {
     updateUser,
     upsertUserWidget,
     enrollFace,
+    registerUserNotificationToken,
+    updateUserNotificationTokenPreferences,
+    unregisterUserNotificationToken,
 } from "../services/user.service.js";
 
 function ensureSelfAccess(req, userId) {
@@ -190,5 +193,36 @@ export async function putWidget(req, res, next) {
         res.json(widget);
     } catch (error) {
         next(error);
+    }
+}
+
+export async function postDeviceToken(req, res, next) {
+    try {
+        const result = await registerUserNotificationToken(req.authUser?.uid, req.body);
+        return res.status(200).json(result);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function deleteDeviceToken(req, res, next) {
+    try {
+        const payload = {
+            ...req.body,
+            ...req.query,
+        };
+        const result = await unregisterUserNotificationToken(req.authUser?.uid, payload);
+        return res.status(200).json(result);
+    } catch (error) {
+        return next(error);
+    }
+}
+
+export async function patchDeviceTokenSettings(req, res, next) {
+    try {
+        const result = await updateUserNotificationTokenPreferences(req.authUser?.uid, req.body);
+        return res.status(200).json(result);
+    } catch (error) {
+        return next(error);
     }
 }

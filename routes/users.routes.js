@@ -11,10 +11,13 @@ import {
     streamUserGroups,
     getWidgets,
     patchUser,
+    patchDeviceTokenSettings,
     postAvatar,
+    postDeviceToken,
     postUser,
     putWidget,
     postEnrollFace,
+    deleteDeviceToken,
 } from "../controllers/user.controller.js";
 
 const router = Router();
@@ -24,6 +27,9 @@ router.use(requireAuth);
 router.get("/check-username", checkUsername);
 router.get("/discover", getUsersForInviteController);
 router.post("/avatar", uploadImage, handleUploadError, postAvatar);
+router.post("/me/device-token", postDeviceToken);
+router.patch("/me/device-token/settings", patchDeviceTokenSettings);
+router.delete("/me/device-token", deleteDeviceToken);
 
 router.get("/", getUsers);
 router.get("/:userId", getUser);

@@ -2,6 +2,11 @@ import { FieldValue } from "firebase-admin/firestore";
 
 import { db } from "../firebaseConfig.js";
 import { MessageModel, UserModel, WidgetModel } from "../models/index.js";
+import {
+    registerNotificationToken,
+    updateNotificationTokenPreferences,
+    unregisterNotificationToken,
+} from "./notification.service.js";
 import { uploadToCloudinary } from "./cloudinary.service.js";
 
 const usersCollection = db.collection("users");
@@ -337,4 +342,31 @@ export async function upsertUserWidget(userId, friendId, payload) {
     await docRef.set(widget.toFirestore(), { merge: true });
     const updated = await docRef.get();
     return WidgetModel.fromSnapshot(updated);
+}
+
+export async function registerUserNotificationToken(userId, payload) {
+    const userDoc = await usersCollection.doc(userId).get();
+    if (!userDoc.exists) {
+        throw makeError("User not found", 404);
+    }
+
+    return registerNotificationToken(userId, payload);
+}
+
+export async function unregisterUserNotificationToken(userId, payload) {
+    const userDoc = await usersCollection.doc(userId).get();
+    if (!userDoc.exists) {
+        throw makeError("User not found", 404);
+    }
+
+    return unregisterNotificationToken(userId, payload);
+}
+
+export async function updateUserNotificationTokenPreferences(userId, payload) {
+    const userDoc = await usersCollection.doc(userId).get();
+    if (!userDoc.exists) {
+        throw makeError("User not found", 404);
+    }
+
+    return updateNotificationTokenPreferences(userId, payload);
 }
