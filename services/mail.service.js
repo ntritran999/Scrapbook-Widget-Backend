@@ -19,10 +19,12 @@ function parseSmtpSecure(value, port) {
 }
 
 function getSmtpConfig() {
-    const host = String(process.env.SMTP_HOST || "").trim();
     const user = String(process.env.SMTP_USER || "").trim();
+    const host = String(process.env.SMTP_HOST || "").trim() || (
+        user.endsWith("@gmail.com") ? "smtp.gmail.com" : ""
+    );
+    const from = String(process.env.SMTP_FROM || "").trim() || user;
     const pass = String(process.env.SMTP_PASS || "").trim();
-    const from = String(process.env.SMTP_FROM || "").trim();
     const port = parseSmtpPort(process.env.SMTP_PORT);
     const secure = parseSmtpSecure(process.env.SMTP_SECURE, port);
 
