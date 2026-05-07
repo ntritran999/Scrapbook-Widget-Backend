@@ -143,6 +143,9 @@ function statusText(statusCode) {
 }
 
 function rejectUpgrade(socket, statusCode, message) {
+    socket.on('error', (err) => {
+        console.error(`[WS] Socket error during upgrade rejection: ${statusCode}`, err.message);
+    });
     socket.write(
         `HTTP/1.1 ${statusCode} ${statusText(statusCode)}\r\n` +
             "Connection: close\r\n" +
