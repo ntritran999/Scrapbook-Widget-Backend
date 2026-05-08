@@ -1,4 +1,5 @@
 import "dotenv/config"
+import "./utils/console-output.js";
 import http from "http"
 import express from "express"
 import cors from "cors"

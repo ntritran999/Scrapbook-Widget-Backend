@@ -13,7 +13,7 @@ Environment variables required for auth:
 
 - Firebase Admin service account key file at `config/firebaseServiceAccountKey.json`
 - `FIREBASE_WEB_API_KEY` for `POST /auth/login` (Firebase Identity Toolkit sign-in)
-- Optional SMTP config for welcome email when new Google account is created:
+- Optional SMTP config for welcome email and email OTP delivery:
   - `SMTP_HOST`
   - `SMTP_PORT` (default: `587`)
   - `SMTP_SECURE` (`true` for SSL, usually `false` on port `587`)
@@ -296,16 +296,74 @@ Note:
 
 ## Authentication
 
-### Register Flow (Android -> Node.js -> Firebase Auth)
+### Register Flow (Android -> Node.js -> Email OTP -> Firebase Auth)
 
-Email/password register is a single step.
+Email/password register is now a two-step flow.
 
-1. Client calls `POST /auth/register` with email/password/profile.
-2. Backend creates Firebase Auth user and profile.
+1. Client calls `POST /auth/register/otp` with the target email.
+2. Backend sends a 6-digit OTP code to that email using Nodemailer.
+3. Client asks user to enter the OTP code.
+4. Client calls `POST /auth/register` with email/password/profile plus `otpCode`.
+5. Backend verifies the OTP, creates Firebase Auth user, creates Firestore profile, and creates the default scrapbook group.
+
+### POST `/auth/register/otp`
+
+Send a 6-digit OTP code to the email address for registration confirmation.
+
+Request body:
+
+```json
+{
+  "email": "john@example.com"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "email": "john@example.com",
+  "otpSent": true,
+  "expiresInMinutes": 10,
+  "retryAfterSeconds": 60
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "email is required"
+}
+```
+
+Response `409`:
+
+```json
+{
+  "message": "email already exists"
+}
+```
+
+Response `429`:
+
+```json
+{
+  "message": "please wait 42s before requesting a new otp"
+}
+```
+
+Response `500`:
+
+```json
+{
+  "message": "smtp is not configured for otp delivery"
+}
+```
 
 ### POST `/auth/register`
 
-Create a Firebase Auth user and initialize profile data in Firestore.
+Confirm the OTP code, create a Firebase Auth user, initialize profile data in Firestore, and create a default scrapbook.
 
 Request body:
 
@@ -313,6 +371,7 @@ Request body:
 {
   "email": "john@example.com",
   "password": "secret123",
+  "otpCode": "123456",
   "displayName": "John Doe",
   "username": "john_doe",
   "nickname": "John",
@@ -326,7 +385,12 @@ Response `201`:
 ```json
 {
   "uid": "firebaseUid",
-  "email": "john@example.com"
+  "email": "john@example.com",
+  "onboarding": {
+    "defaultGroupId": "groupId",
+    "defaultGroupName": "Default Scrapbook",
+    "defaultPageId": "pageId"
+  }
 }
 ```
 
@@ -335,6 +399,30 @@ Response `400`:
 ```json
 {
   "message": "email and password are required (accepted keys: email/mail/userEmail + password/pass/userPassword)"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "otpCode is required"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "invalid otp code"
+}
+```
+
+Response `400`:
+
+```json
+{
+  "message": "otp code expired"
 }
 ```
 

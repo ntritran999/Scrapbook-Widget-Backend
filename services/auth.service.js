@@ -1,12 +1,14 @@
+import crypto from "node:crypto";
 import { getAuth } from "firebase-admin/auth";
-import { FieldPath, FieldValue } from "firebase-admin/firestore";
+import { FieldValue } from "firebase-admin/firestore";
 
 import { db, firebaseApp } from "../firebaseConfig.js";
 import { createGroupWithMembers } from "./group.service.js";
-import { sendNewGoogleAccountWelcomeEmail } from "./mail.service.js";
+import { sendNewGoogleAccountWelcomeEmail, sendRegisterOtpEmail } from "./mail.service.js";
 
 const usersCollection = db.collection("users");
 const groupsCollection = db.collection("groups");
+const registerOtpsCollection = db.collection("registerOtps");
 
 const DELETED_USER_UID = "deleted-user";
 const DELETED_USER_NAME = "Deleted User";
@@ -15,6 +17,8 @@ const DELETED_USER_AVATAR_URL = "https://placehold.co/128x128?text=Deleted";
 const DELETED_CONTENT_IMAGE_URL = "https://placehold.co/600x400?text=Deleted+Content";
 const DELETED_TEXT_CONTENT = "[Content from deleted account]";
 const DELETE_BATCH_LIMIT = 450;
+const REGISTER_OTP_EXPIRES_MINUTES = 10;
+const REGISTER_OTP_RESEND_SECONDS = 60;
 
 function makeError(message, statusCode) {
     const error = new Error(message);
@@ -41,6 +45,22 @@ function normalizeAuthPayload(payload = {}) {
     return {
         email: String(emailCandidate).trim(),
         password: String(passwordCandidate),
+    };
+}
+
+function normalizeRegisterPayload(payload = {}) {
+    const raw = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const normalizedAuth = normalizeAuthPayload(raw);
+
+    return {
+        email: normalizedAuth.email,
+        password: normalizedAuth.password,
+        otpCode: String(raw.otpCode ?? raw.otp ?? raw.code ?? "").trim(),
+        displayName: String(raw.displayName || "").trim(),
+        username: String(raw.username || "").trim(),
+        nickname: String(raw.nickname || "").trim(),
+        avatarUrl: String(raw.avatarUrl || "").trim(),
+        status: String(raw.status || "active").trim() || "active",
     };
 }
 
@@ -72,6 +92,40 @@ function mapFirebaseLoginError(firebaseMessage = "") {
 
 function normalizeUid(uid) {
     return String(uid || "").trim();
+}
+
+function normalizeOtpCode(value) {
+    return String(value || "").replace(/\D/g, "").slice(0, 6);
+}
+
+function encodeEmailDocId(email) {
+    return encodeURIComponent(normalizeEmail(email));
+}
+
+function generateRegisterOtpCode() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function hashRegisterOtp(email, otpCode) {
+    return crypto
+        .createHash("sha256")
+        .update(`${normalizeEmail(email)}:${normalizeOtpCode(otpCode)}`)
+        .digest("hex");
+}
+
+function getOtpExpiryDate() {
+    return new Date(Date.now() + REGISTER_OTP_EXPIRES_MINUTES * 60 * 1000);
+}
+
+function getOtpRemainingSeconds(lastSentAt) {
+    const sentAtDate = lastSentAt instanceof Date ? lastSentAt : null;
+    if (!sentAtDate) {
+        return 0;
+    }
+
+    const elapsedMs = Date.now() - sentAtDate.getTime();
+    const remainingMs = REGISTER_OTP_RESEND_SECONDS * 1000 - elapsedMs;
+    return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
 }
 
 function extractIdToken(payload = {}) {
@@ -185,17 +239,255 @@ function createBatchWriter() {
     return { set, del, commitAll };
 }
 
+async function isEmailAlreadyRegistered(email) {
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail) {
+        return false;
+    }
+
+    try {
+        await getAuth(firebaseApp).getUserByEmail(normalizedEmail);
+        return true;
+    } catch (error) {
+        if (error?.code === "auth/user-not-found") {
+            return false;
+        }
+        throw error;
+    }
+}
+
+async function consumeRegisterOtp(email, otpCode) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedOtpCode = normalizeOtpCode(otpCode);
+
+    if (!normalizedOtpCode || normalizedOtpCode.length !== 6) {
+        throw makeError("otpCode must be a 6-digit code", 400);
+    }
+
+    const otpRef = registerOtpsCollection.doc(encodeEmailDocId(normalizedEmail));
+    const otpDoc = await otpRef.get();
+
+    if (!otpDoc.exists) {
+        throw makeError("otp code not found or expired", 400);
+    }
+
+    const otpData = otpDoc.data() || {};
+    const expiresAtDate =
+        typeof otpData.expiresAt?.toDate === "function"
+            ? otpData.expiresAt.toDate()
+            : otpData.expiresAt instanceof Date
+                ? otpData.expiresAt
+                : null;
+
+    if (!expiresAtDate || expiresAtDate.getTime() <= Date.now()) {
+        await otpRef.delete();
+        throw makeError("otp code expired", 400);
+    }
+
+    const expectedHash = String(otpData.otpHash || "");
+    const actualHash = hashRegisterOtp(normalizedEmail, normalizedOtpCode);
+    if (!expectedHash || expectedHash !== actualHash) {
+        throw makeError("invalid otp code", 400);
+    }
+
+    await otpRef.delete();
+}
+
+async function cleanupDeletedAccountData(normalizedUid) {
+    const writer = createBatchWriter();
+
+    let ownershipTransferredGroups = 0;
+    let removedMemberships = 0;
+    let anonymizedMessages = 0;
+    let removedSeenBy = 0;
+    let anonymizedPages = 0;
+    let anonymizedItems = 0;
+    let anonymizedWidgets = 0;
+    let deletedOwnWidgets = 0;
+
+    const [groupsSnapshot, usersSnapshot] = await Promise.all([
+        groupsCollection.get(),
+        usersCollection.get(),
+    ]);
+
+    for (const groupDoc of groupsSnapshot.docs) {
+        const [membersSnapshot, messagesSnapshot, pagesSnapshot] = await Promise.all([
+            groupDoc.ref.collection("members").get(),
+            groupDoc.ref.collection("messages").get(),
+            groupDoc.ref.collection("scrapbookPages").get(),
+        ]);
+
+        const memberDoc = membersSnapshot.docs.find((doc) => doc.id === normalizedUid);
+        const isOwner = String(groupDoc.data()?.createdBy || "") === normalizedUid;
+
+        if (isOwner) {
+            const replacementOwner = pickReplacementOwner(membersSnapshot.docs, normalizedUid);
+            await writer.set(
+                groupDoc.ref,
+                {
+                    createdBy: replacementOwner,
+                },
+                { merge: true }
+            );
+            ownershipTransferredGroups += 1;
+        }
+
+        if (memberDoc) {
+            await writer.del(memberDoc.ref);
+            removedMemberships += 1;
+        }
+
+        for (const messageDoc of messagesSnapshot.docs) {
+            const messageData = messageDoc.data() || {};
+
+            if (String(messageData.createdBy || "") === normalizedUid) {
+                const currentContent = messageData.content;
+                const normalizedType = String(messageData.type || "text");
+
+                await writer.set(
+                    messageDoc.ref,
+                    {
+                        createdBy: DELETED_USER_UID,
+                        content: hasMeaningfulContent(currentContent)
+                            ? currentContent
+                            : fallbackContentByType(normalizedType),
+                    },
+                    { merge: true }
+                );
+                anonymizedMessages += 1;
+            }
+
+            const seenByDoc = await messageDoc.ref.collection("seenBy").doc(normalizedUid).get();
+            if (seenByDoc.exists) {
+                await writer.del(seenByDoc.ref);
+                removedSeenBy += 1;
+            }
+        }
+
+        for (const pageDoc of pagesSnapshot.docs) {
+            const pageData = pageDoc.data() || {};
+
+            if (String(pageData.createdBy || "") === normalizedUid) {
+                await writer.set(
+                    pageDoc.ref,
+                    {
+                        createdBy: DELETED_USER_UID,
+                    },
+                    { merge: true }
+                );
+                anonymizedPages += 1;
+            }
+
+            const itemsSnapshot = await pageDoc.ref.collection("items").get();
+            for (const itemDoc of itemsSnapshot.docs) {
+                const itemData = itemDoc.data() || {};
+                if (String(itemData.createdBy || "") !== normalizedUid) {
+                    continue;
+                }
+
+                const currentContent = itemData.content;
+                const normalizedType = String(itemData.type || "text");
+
+                await writer.set(
+                    itemDoc.ref,
+                    {
+                        createdBy: DELETED_USER_UID,
+                        content: hasMeaningfulContent(currentContent)
+                            ? currentContent
+                            : fallbackContentByType(normalizedType),
+                    },
+                    { merge: true }
+                );
+                anonymizedItems += 1;
+            }
+        }
+    }
+
+    for (const userDoc of usersSnapshot.docs) {
+        if (userDoc.id === normalizedUid) {
+            continue;
+        }
+
+        const widgetDoc = await userDoc.ref.collection("widgets").doc(normalizedUid).get();
+        if (!widgetDoc.exists) {
+            continue;
+        }
+
+        await writer.set(
+            widgetDoc.ref,
+            {
+                latestPhotoUrl: DELETED_CONTENT_IMAGE_URL,
+                senderAvatar: DELETED_USER_AVATAR_URL,
+                status: "inactive",
+                updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+        );
+        anonymizedWidgets += 1;
+    }
+
+    const ownWidgetsSnapshot = await usersCollection.doc(normalizedUid).collection("widgets").get();
+    for (const widgetDoc of ownWidgetsSnapshot.docs) {
+        await writer.del(widgetDoc.ref);
+        deletedOwnWidgets += 1;
+    }
+
+    const batchCommits = await writer.commitAll();
+
+    return {
+        groupsOwnershipTransferred: ownershipTransferredGroups,
+        membershipsRemoved: removedMemberships,
+        messagesAnonymized: anonymizedMessages,
+        messageSeenByRemoved: removedSeenBy,
+        scrapbookPagesAnonymized: anonymizedPages,
+        scrapbookItemsAnonymized: anonymizedItems,
+        widgetsAnonymized: anonymizedWidgets,
+        ownWidgetsRemoved: deletedOwnWidgets,
+        batchCommits,
+    };
+}
+
+async function finalizeDeletedAuthAccount(normalizedUid) {
+    const auth = getAuth(firebaseApp);
+
+    try {
+        await auth.revokeRefreshTokens(normalizedUid);
+    } catch (error) {
+        if (error?.code !== "auth/user-not-found") {
+            throw error;
+        }
+    }
+
+    try {
+        await auth.deleteUser(normalizedUid);
+        return {
+            hardDeletedAuth: true,
+            alreadyDeleted: false,
+        };
+    } catch (error) {
+        if (error?.code === "auth/user-not-found") {
+            return {
+                hardDeletedAuth: true,
+                alreadyDeleted: true,
+            };
+        }
+        throw error;
+    }
+}
+
 export async function registerWithEmailAndPassword(payload) {
-    const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
-    const { email: rawEmail, password } = normalizeAuthPayload(normalized);
-    const email = normalizeEmail(rawEmail);
+    const normalized = normalizeRegisterPayload(payload);
     const {
-        displayName = "",
-        username = "",
-        nickname = "",
-        avatarUrl = "",
-        status = "active",
+        email: rawEmail,
+        password,
+        otpCode,
+        displayName,
+        username,
+        nickname,
+        avatarUrl,
+        status,
     } = normalized;
+    const email = normalizeEmail(rawEmail);
 
     if (!email || !password) {
         throw makeError(
@@ -211,6 +503,12 @@ export async function registerWithEmailAndPassword(payload) {
     if (String(password).length < 6) {
         throw makeError("password must be at least 6 characters", 400);
     }
+
+    if (!otpCode) {
+        throw makeError("otpCode is required", 400);
+    }
+
+    await consumeRegisterOtp(email, otpCode);
 
     try {
         const auth = getAuth(firebaseApp);
@@ -232,9 +530,21 @@ export async function registerWithEmailAndPassword(payload) {
             { merge: true }
         );
 
+        const starterGroup = await createGroupWithMembers({
+            groupName: "Default Scrapbook",
+            avatarUrl: "",
+            createdBy: userRecord.uid,
+            memberIds: [],
+        });
+
         return {
             uid: userRecord.uid,
             email: userRecord.email,
+            onboarding: {
+                defaultGroupId: starterGroup.id,
+                defaultGroupName: starterGroup.groupName,
+                defaultPageId: starterGroup.latestPage?.id || null,
+            },
         };
     } catch (error) {
         if (error?.code === "auth/email-already-exists") {
@@ -242,6 +552,96 @@ export async function registerWithEmailAndPassword(payload) {
         }
         throw error;
     }
+}
+
+export async function sendRegisterOtp(payload) {
+    const normalized = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const email = normalizeEmail(
+        normalized.email ??
+        normalized.mail ??
+        normalized.userEmail ??
+        ""
+    );
+
+    if (!email) {
+        throw makeError("email is required", 400);
+    }
+
+    if (!isValidEmail(email)) {
+        throw makeError("email format is invalid", 400);
+    }
+
+    const emailExists = await isEmailAlreadyRegistered(email);
+    if (emailExists) {
+        throw makeError("email already exists", 409);
+    }
+
+    const otpRef = registerOtpsCollection.doc(encodeEmailDocId(email));
+    const otpDoc = await otpRef.get();
+    const otpData = otpDoc.exists ? (otpDoc.data() || {}) : {};
+    const lastSentAt =
+        typeof otpData.lastSentAt?.toDate === "function"
+            ? otpData.lastSentAt.toDate()
+            : otpData.lastSentAt instanceof Date
+                ? otpData.lastSentAt
+                : null;
+    const retryAfterSeconds = getOtpRemainingSeconds(lastSentAt);
+
+    if (retryAfterSeconds > 0) {
+        throw makeError(`please wait ${retryAfterSeconds}s before requesting a new otp`, 429);
+    }
+
+    const otpCode = generateRegisterOtpCode();
+    const expiresAt = getOtpExpiryDate();
+
+    await otpRef.set(
+        {
+            email,
+            otpHash: hashRegisterOtp(email, otpCode),
+            expiresAt,
+            lastSentAt: FieldValue.serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+    );
+
+    let emailDelivery = {
+        sent: false,
+        skipped: true,
+        reason: "unknown",
+    };
+
+    try {
+        emailDelivery = await sendRegisterOtpEmail({
+            toEmail: email,
+            otpCode,
+            expiresInMinutes: REGISTER_OTP_EXPIRES_MINUTES,
+        });
+    } catch (error) {
+        console.error(`[AUTH_OTP] Failed to send register OTP to ${email}`, error);
+        emailDelivery = {
+            sent: false,
+            skipped: false,
+            reason: "send-failed",
+        };
+    }
+
+    if (!emailDelivery.sent) {
+        await otpRef.delete();
+        throw makeError(
+            emailDelivery.reason === "smtp-not-configured"
+                ? "smtp is not configured for otp delivery"
+                : "failed to send otp email",
+            500
+        );
+    }
+
+    return {
+        email,
+        otpSent: true,
+        expiresInMinutes: REGISTER_OTP_EXPIRES_MINUTES,
+        retryAfterSeconds: REGISTER_OTP_RESEND_SECONDS,
+    };
 }
 
 export async function loginWithEmailAndPassword(payload) {
@@ -467,9 +867,6 @@ export async function deleteAccountByUid(uid) {
         throw makeError("unauthorized", 401);
     }
 
-    const auth = getAuth(firebaseApp);
-    const writer = createBatchWriter();
-
     await usersCollection.doc(normalizedUid).set(
         {
             username: DELETED_USER_NAME,
@@ -483,163 +880,32 @@ export async function deleteAccountByUid(uid) {
         { merge: true }
     );
 
-    let ownershipTransferredGroups = 0;
-    let removedMemberships = 0;
-    let anonymizedMessages = 0;
-    let removedSeenBy = 0;
-    let anonymizedPages = 0;
-    let anonymizedItems = 0;
-    let anonymizedWidgets = 0;
-    let deletedOwnWidgets = 0;
-
-    const ownedGroupsSnapshot = await groupsCollection.where("createdBy", "==", normalizedUid).get();
-    for (const groupDoc of ownedGroupsSnapshot.docs) {
-        const membersSnapshot = await groupDoc.ref.collection("members").get();
-        const replacementOwner = pickReplacementOwner(membersSnapshot.docs, normalizedUid);
-
-        await writer.set(
-            groupDoc.ref,
-            {
-                createdBy: replacementOwner,
-            },
-            { merge: true }
-        );
-        ownershipTransferredGroups += 1;
-    }
-
-    const membershipsSnapshot = await db
-        .collectionGroup("members")
-        .where(FieldPath.documentId(), "==", normalizedUid)
-        .get();
-    for (const memberDoc of membershipsSnapshot.docs) {
-        await writer.del(memberDoc.ref);
-        removedMemberships += 1;
-    }
-
-    const messagesSnapshot = await db
-        .collectionGroup("messages")
-        .where("createdBy", "==", normalizedUid)
-        .get();
-    for (const messageDoc of messagesSnapshot.docs) {
-        const data = messageDoc.data() || {};
-        const currentContent = data.content;
-        const normalizedType = String(data.type || "text");
-
-        await writer.set(
-            messageDoc.ref,
-            {
-                createdBy: DELETED_USER_UID,
-                content: hasMeaningfulContent(currentContent)
-                    ? currentContent
-                    : fallbackContentByType(normalizedType),
-            },
-            { merge: true }
-        );
-        anonymizedMessages += 1;
-    }
-
-    const seenBySnapshot = await db
-        .collectionGroup("seenBy")
-        .where(FieldPath.documentId(), "==", normalizedUid)
-        .get();
-    for (const seenByDoc of seenBySnapshot.docs) {
-        await writer.del(seenByDoc.ref);
-        removedSeenBy += 1;
-    }
-
-    const pagesSnapshot = await db
-        .collectionGroup("scrapbookPages")
-        .where("createdBy", "==", normalizedUid)
-        .get();
-    for (const pageDoc of pagesSnapshot.docs) {
-        await writer.set(
-            pageDoc.ref,
-            {
-                createdBy: DELETED_USER_UID,
-            },
-            { merge: true }
-        );
-        anonymizedPages += 1;
-    }
-
-    const itemsSnapshot = await db
-        .collectionGroup("items")
-        .where("createdBy", "==", normalizedUid)
-        .get();
-    for (const itemDoc of itemsSnapshot.docs) {
-        const data = itemDoc.data() || {};
-        const currentContent = data.content;
-        const normalizedType = String(data.type || "text");
-
-        await writer.set(
-            itemDoc.ref,
-            {
-                createdBy: DELETED_USER_UID,
-                content: hasMeaningfulContent(currentContent)
-                    ? currentContent
-                    : fallbackContentByType(normalizedType),
-            },
-            { merge: true }
-        );
-        anonymizedItems += 1;
-    }
-
-    const widgetsSnapshot = await db
-        .collectionGroup("widgets")
-        .where(FieldPath.documentId(), "==", normalizedUid)
-        .get();
-    for (const widgetDoc of widgetsSnapshot.docs) {
-        await writer.set(
-            widgetDoc.ref,
-            {
-                latestPhotoUrl: DELETED_CONTENT_IMAGE_URL,
-                senderAvatar: DELETED_USER_AVATAR_URL,
-                status: "inactive",
-                updatedAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-        );
-        anonymizedWidgets += 1;
-    }
-
-    const ownWidgetsSnapshot = await usersCollection.doc(normalizedUid).collection("widgets").get();
-    for (const widgetDoc of ownWidgetsSnapshot.docs) {
-        await writer.del(widgetDoc.ref);
-        deletedOwnWidgets += 1;
-    }
-
-    const batchCommits = await writer.commitAll();
-
-    await auth.revokeRefreshTokens(normalizedUid);
-
-    try {
-        await auth.deleteUser(normalizedUid);
-    } catch (error) {
-        if (error?.code === "auth/user-not-found") {
-            throw makeError("account not found", 404);
-        }
-        throw error;
-    }
+    setImmediate(() => {
+        Promise.all([
+            finalizeDeletedAuthAccount(normalizedUid),
+            cleanupDeletedAccountData(normalizedUid),
+        ])
+            .then(([authResult, cleanup]) => {
+                console.log(`[ACCOUNT_DELETE] Background cleanup completed for ${normalizedUid}`, {
+                    ...authResult,
+                    cleanup,
+                });
+            })
+            .catch((error) => {
+                console.error(`[ACCOUNT_DELETE] Background cleanup failed for ${normalizedUid}`, error);
+            });
+    });
 
     return {
         uid: normalizedUid,
         softDeleted: true,
-        hardDeletedAuth: true,
+        hardDeletedAuth: false,
+        cleanupStarted: true,
         placeholders: {
             userAvatarUrl: DELETED_USER_AVATAR_URL,
             contentImageUrl: DELETED_CONTENT_IMAGE_URL,
             text: DELETED_TEXT_CONTENT,
         },
-        cleanup: {
-            groupsOwnershipTransferred: ownershipTransferredGroups,
-            membershipsRemoved: removedMemberships,
-            messagesAnonymized: anonymizedMessages,
-            messageSeenByRemoved: removedSeenBy,
-            scrapbookPagesAnonymized: anonymizedPages,
-            scrapbookItemsAnonymized: anonymizedItems,
-            widgetsAnonymized: anonymizedWidgets,
-            ownWidgetsRemoved: deletedOwnWidgets,
-            batchCommits,
-        },
+        cleanup: null,
     };
 }
